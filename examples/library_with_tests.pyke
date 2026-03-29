@@ -1,0 +1,27 @@
+# A library project with tests and install rules
+
+from github import "google/googletest" as GTest, tag="v1.15.2"
+
+project("MyLib", version="0.1.0", lang="c++20")
+
+@StaticLibrary("lib")
+target mylib():
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+        self.includes = ["src/internal/"]
+        self.exports.includes = ["include/"]
+        self.pch = "src/pch.hpp"
+
+        if compiler == "msvc":
+            self.flags += ["/W4"]
+        else:
+            self.flags += ["-Wall", "-Wextra"]
+
+    def install(self):
+        self.library = "lib"
+        self.headers = ("include/", "include/mylib")
+
+@Executable("tests", test=True, copy_dlls=False, source_groups=False)
+target mylib_tests(PRIVATE mylib, PRIVATE GTest):
+    def configure(self):
+        self.sources = ["src/*.cpp"]

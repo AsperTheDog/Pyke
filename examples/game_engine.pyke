@@ -1,0 +1,52 @@
+from packages import Boost, fmt, OpenGL, Threads
+
+project("GameEngine", version="0.1.0", lang="c++20")
+
+option use_opengl: bool = True
+
+@SharedLibrary
+target Core():
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+        self.includes = ["src/internal/"]
+        self.exports.includes = ["include/"]
+        self.exports.definitions = {"CORE_API": 1}
+
+    def install(self):
+        self.library = "lib"
+        self.headers = ("include/", "include/core")
+
+@SharedLibrary("libs/renderer")
+target Renderer(PRIVATE Core, PUBLIC Boost.System):
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+        self.exports.includes = ["include/"]
+
+        if use_opengl:
+            self.sources += ["src/gl/*.cpp"]
+            self.link += [OpenGL]
+
+        if platform == "windows":
+            self.definitions["RENDERER_WIN32"] = True
+
+        if compiler == "msvc":
+            self.flags += ["/W4"]
+        else:
+            self.flags += ["-Wall", "-Wextra"]
+
+    def install(self):
+        self.library = "lib"
+        self.headers = ("include/", "include/renderer")
+
+@Executable
+target Game(PRIVATE Core, PRIVATE Renderer, PRIVATE fmt, PRIVATE Threads):
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+
+        if compiler == "msvc":
+            self.flags += ["/W4", "/WX"]
+        else:
+            self.flags += ["-Wall", "-Wextra", "-Werror"]
+
+        if build_type == "debug":
+            self.definitions["DEBUG"] = True

@@ -1,0 +1,37 @@
+# Example: Vulkan SDK project with SDL3, GLM, and Slang
+# Demonstrates env variables, string concatenation, link_dirs, copy_files
+
+from packages import Threads
+from env import VULKAN_SDK
+
+project("VulkanApp", version="1.0.0", lang="c++20")
+
+@Executable
+target VulkanApp(PRIVATE Threads):
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+        self.includes = [VULKAN_SDK + "/Include"]
+        self.link_dirs = [VULKAN_SDK + "/Lib"]
+
+        # Link against Vulkan SDK libraries
+        self.link += ["vulkan-1", "SDL3", "slang"]
+
+        # GLM is header-only, just needs include
+        # (already covered by the Include dir above)
+
+        if platform == "windows":
+            # Copy DLLs from Vulkan SDK bin directory
+            if build_type == "debug":
+                self.copy_files = [
+                    VULKAN_SDK + "/Bin/SDL3.dll",
+                    VULKAN_SDK + "/Bin/slang.dll"
+                ]
+
+            # Debug builds may use different DLL names for SDL
+            else:
+                self.copy_files += [VULKAN_SDK + "/Bin/SDL3d.dll"]
+
+        if compiler == "msvc":
+            self.flags += ["/W4"]
+        else:
+            self.flags += ["-Wall", "-Wextra"]

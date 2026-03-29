@@ -1,0 +1,35 @@
+{
+    "name": "pyke-language",
+    "displayName": "Pyke Language",
+    "description": "Syntax highlighting for the Pyke build configuration language (.pyke files)",
+    "version": "0.1.0",
+    "publisher": "pyke",
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "pyke",
+                "aliases": [
+                    "Pyke",
+                    "pyke"
+                ],
+                "extensions": [
+                    ".pyke"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "pyke",
+                "scopeName": "source.pyke",
+                "path": "./syntaxes/pyke.tmLanguage.json"
+            }
+        ]
+    }
+}

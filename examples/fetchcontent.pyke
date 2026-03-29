@@ -1,0 +1,13 @@
+# Fetching dependencies from GitHub instead of requiring system installs
+
+from github import "fmtlib/fmt" as fmt, tag="11.0.2"
+from github import "gabime/spdlog" as spdlog, tag="v1.14.1"
+from github import "nlohmann/json" as nlohmann_json, tag="v3.11.3"
+
+project("MyApp", version="1.0.0", lang="c++20")
+
+@Executable
+target myapp(PRIVATE fmt, PRIVATE spdlog, PRIVATE nlohmann_json):
+    def configure(self):
+        self.sources = ["src/main.cpp", "src/app.cpp"]
+        self.includes = ["src/"]

@@ -1,0 +1,41 @@
+project("pyke", version="0.1.0", lang="c++20")
+
+# Static library containing the compiler core
+# All source paths are relative to lib/
+@StaticLibrary("lib")
+target pyke_core():
+    def configure(self):
+        self.sources = [
+            "../src/lexer.cpp",
+            "../src/parser.cpp",
+            "../src/analyzer.cpp",
+            "../src/generator.cpp"
+        ]
+        self.exports.includes = ["../src"]
+
+# Main compiler executable
+@Executable("bin")
+target pyke(PRIVATE pyke_core):
+    def configure(self):
+        self.sources = ["../src/main.cpp"]
+
+# Tests
+@Executable("tests/lexer")
+target test_lexer(PRIVATE pyke_core):
+    def configure(self):
+        self.sources = ["../../tests/test_lexer.cpp"]
+
+@Executable("tests/parser")
+target test_parser(PRIVATE pyke_core):
+    def configure(self):
+        self.sources = ["../../tests/test_parser.cpp"]
+
+@Executable("tests/analyzer")
+target test_analyzer(PRIVATE pyke_core):
+    def configure(self):
+        self.sources = ["../../tests/test_analyzer.cpp"]
+
+@Executable("tests/generator")
+target test_generator(PRIVATE pyke_core):
+    def configure(self):
+        self.sources = ["../../tests/test_generator.cpp"]

@@ -1,0 +1,8 @@
+# The simplest possible Pyke project
+
+project("HelloWorld", version="1.0.0", lang="c++17")
+
+@Executable
+target hello():
+    def configure(self):
+        self.sources = ["src/main.cpp"]

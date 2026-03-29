@@ -1,0 +1,179 @@
+# Voxel - A small voxel engine
+# Showcases every Pyke language feature in a realistic project
+
+from packages import Boost, Threads
+from packages import OpenAL if use_audio
+from env import VULKAN_SDK
+from github import "fmtlib/fmt" as fmt, tag="11.0.2"
+from github import "gabime/spdlog" as spdlog, tag="v1.14.1"
+from github import "g-truc/glm" as glm
+from github import "ocornut/imgui" as imgui
+
+project("Voxel", version="0.3.0", lang="c++20", output_dir="bin", presets=True)
+
+option use_vulkan: bool = True
+option use_audio: bool = False
+option enable_profiling: bool = False
+option asset_path: str = "assets/"
+
+# Math utilities - header-only, no compiled sources
+@HeaderOnly("libs/vmath")
+target vmath():
+    def configure(self):
+        self.exports.includes = ["include/"]
+        self.exports.definitions = {"VMATH_USE_SSE": 1}
+
+# Core engine library - static, PCH, unity build for fast compilation
+@StaticLibrary("libs/core", unity_build=True)
+target voxel_core(PRIVATE fmt, PRIVATE spdlog, PRIVATE Threads):
+    def configure(self):
+        self.sources = [
+            "src/logger.cpp",
+            "src/config.cpp",
+            "src/resource_manager.cpp",
+            "src/event_bus.cpp"
+        ]
+        self.pch = "src/pch.h"
+        self.includes = ["src/internal/"]
+        self.exports.includes = ["include/"]
+        self.exports.definitions = {"VOXEL_CORE_API": 1}
+
+        if enable_profiling:
+            self.definitions["VOXEL_PROFILING"] = True
+            self.sources += ["src/profiler.cpp"]
+
+        if compiler == "msvc":
+            self.flags += ["/W4", "/permissive-"]
+        elif compiler == "clang":
+            self.flags += ["-Wall", "-Wextra", "-Wno-unused-parameter"]
+        else:
+            self.flags += ["-Wall", "-Wextra"]
+
+    def install(self):
+        self.library = "lib"
+        self.headers = ("include/", "include/voxel/core")
+
+# Renderer - shared library, Vulkan SDK, platform-specific, custom shader commands
+@SharedLibrary("libs/renderer", source_groups=False)
+target voxel_renderer(PRIVATE voxel_core, PRIVATE vmath, PRIVATE glm, PRIVATE imgui, PUBLIC Boost.Asio):
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+        self.exports.includes = ["include/"]
+
+        # Shader compilation via custom commands
+        self.commands = [
+            ("glslc src/shaders/triangle.vert -o triangle.vert.spv",
+                ["triangle.vert.spv"], ["src/shaders/triangle.vert"]),
+            ("glslc src/shaders/triangle.frag -o triangle.frag.spv",
+                ["triangle.frag.spv"], ["src/shaders/triangle.frag"])
+        ]
+
+        if use_vulkan:
+            self.includes += [VULKAN_SDK + "/Include"]
+            self.link_dirs = [VULKAN_SDK + "/Lib"]
+            self.link += ["vulkan-1"]
+            self.definitions["RENDERER_VULKAN"] = True
+            self.sources += ["src/vulkan/*.cpp"]
+
+        if platform == "windows":
+            self.definitions["RENDERER_WIN32"] = True
+            self.sources += ["src/platform/win_surface.cpp"]
+        elif platform == "linux":
+            self.sources += ["src/platform/x11_surface.cpp"]
+            self.link += [Threads]
+        elif platform == "macos":
+            self.sources += ["src/platform/metal_bridge.cpp"]
+
+        if compiler == "msvc":
+            self.flags += ["/W4", "/WX"]
+        else:
+            self.flags += ["-Wall", "-Wextra", "-Werror"]
+
+        if build_type == "debug":
+            self.definitions["RENDERER_VALIDATION_LAYERS"] = True
+
+        self.exports.flags = ["-DVOXEL_RENDERER_ENABLED"]
+
+    def install(self):
+        self.runtime = "bin"
+        self.library = "lib"
+        self.headers = ("include/", "include/voxel/renderer")
+
+# Audio module - only built when use_audio is on
+@SharedLibrary("libs/audio")
+target voxel_audio(PRIVATE voxel_core):
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+        self.exports.includes = ["include/"]
+
+        if use_audio:
+            self.link += [OpenAL]
+
+        if platform == "windows":
+            self.definitions["AUDIO_WASAPI"] = True
+
+# Networking module
+@SharedLibrary("libs/network")
+target voxel_net(PRIVATE voxel_core, PUBLIC Boost.Asio, PRIVATE Threads):
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+        self.includes = ["src/internal/"]
+        self.exports.includes = ["include/"]
+        self.exports.definitions = {"VOXEL_NET_API": 1}
+
+        if platform == "windows":
+            self.definitions["WIN32_LEAN_AND_MEAN"] = True
+
+    def install(self):
+        self.library = "lib"
+
+# Main game executable - copies assets and Vulkan DLLs
+@Executable
+target voxel(PRIVATE voxel_core, PRIVATE voxel_renderer, PRIVATE voxel_audio, PRIVATE voxel_net, PRIVATE vmath, PRIVATE fmt):
+    def configure(self):
+        self.sources = ["src/main.cpp", "src/game.cpp", "src/world.cpp", "src/chunk.cpp"]
+        self.includes = ["src/"]
+
+        # Copy game assets to output directory
+        self.assets = ["assets/"]
+
+        if compiler == "msvc":
+            self.flags += ["/W4"]
+        else:
+            self.flags += ["-Wall", "-Wextra"]
+
+        if build_type == "debug":
+            self.definitions["VOXEL_DEBUG"] = True
+
+        # Copy Vulkan SDK runtime DLLs on Windows
+        if platform == "windows":
+            if use_vulkan:
+                self.copy_files = [
+                    VULKAN_SDK + "/Bin/vulkan-1.dll",
+                    VULKAN_SDK + "/Bin/shaderc_shared.dll"
+                ]
+
+# Unit tests - minimal, registered with CTest
+@Executable("tests/unit", test=True, copy_dlls=False, source_groups=False)
+target voxel_tests(PRIVATE voxel_core, PRIVATE vmath):
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+
+# Integration tests - network stack
+@Executable("tests/integration", test=True, copy_dlls=False, source_groups=False)
+target voxel_net_tests(PRIVATE voxel_core, PRIVATE voxel_net, PRIVATE Threads):
+    def configure(self):
+        self.sources = [
+            "test_connection.cpp",
+            "test_protocol.cpp",
+            "test_sync.cpp"
+        ]
+
+# Benchmark executable - unity build for fast compile, not a test
+@Executable("tests/bench", test=False, unity_build=True, source_groups=False)
+target voxel_bench(PRIVATE voxel_core, PRIVATE voxel_renderer, PRIVATE vmath):
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+
+        if build_type == "release":
+            self.flags += ["-O3"]

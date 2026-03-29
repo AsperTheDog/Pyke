@@ -1,0 +1,129 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Pyke",
+    "scopeName": "source.pyke",
+    "patterns": [
+        { "include": "#comments" },
+        { "include": "#decorators" },
+        { "include": "#keywords" },
+        { "include": "#target-types" },
+        { "include": "#visibility" },
+        { "include": "#builtins" },
+        { "include": "#option-types" },
+        { "include": "#booleans" },
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        { "include": "#self" },
+        { "include": "#operators" },
+        { "include": "#function-def" },
+        { "include": "#target-def" },
+        { "include": "#import-statement" }
+    ],
+    "repository": {
+        "comments": {
+            "name": "comment.line.number-sign.pyke",
+            "match": "#.*$"
+        },
+        "decorators": {
+            "patterns": [
+                {
+                    "name": "meta.decorator.pyke",
+                    "match": "(@)(Executable|SharedLibrary|StaticLibrary|HeaderOnly)",
+                    "captures": {
+                        "1": { "name": "punctuation.decorator.pyke" },
+                        "2": { "name": "entity.name.type.decorator.pyke" }
+                    }
+                }
+            ]
+        },
+        "keywords": {
+            "patterns": [
+                {
+                    "name": "keyword.control.pyke",
+                    "match": "\\b(if|elif|else)\\b"
+                },
+                {
+                    "name": "keyword.other.pyke",
+                    "match": "\\b(from|import|target|def|option|project)\\b"
+                }
+            ]
+        },
+        "target-types": {
+            "name": "support.type.pyke",
+            "match": "\\b(Executable|SharedLibrary|StaticLibrary|HeaderOnly)\\b"
+        },
+        "visibility": {
+            "name": "keyword.other.visibility.pyke",
+            "match": "\\b(PUBLIC|PRIVATE)\\b"
+        },
+        "builtins": {
+            "name": "variable.language.builtin.pyke",
+            "match": "\\b(platform|compiler|build_type|packages)\\b"
+        },
+        "option-types": {
+            "name": "support.type.primitive.pyke",
+            "match": "\\b(bool|str|path)\\b"
+        },
+        "booleans": {
+            "name": "constant.language.boolean.pyke",
+            "match": "\\b(True|False)\\b"
+        },
+        "strings": {
+            "name": "string.quoted.double.pyke",
+            "begin": "\"",
+            "end": "\"",
+            "patterns": [
+                {
+                    "name": "constant.character.escape.pyke",
+                    "match": "\\\\[nrt\\\\\"']"
+                }
+            ]
+        },
+        "numbers": {
+            "name": "constant.numeric.integer.pyke",
+            "match": "\\b[0-9]+\\b"
+        },
+        "self": {
+            "name": "variable.language.self.pyke",
+            "match": "\\bself\\b"
+        },
+        "operators": {
+            "patterns": [
+                {
+                    "name": "keyword.operator.comparison.pyke",
+                    "match": "=="
+                },
+                {
+                    "name": "keyword.operator.assignment.augmented.pyke",
+                    "match": "\\+="
+                },
+                {
+                    "name": "keyword.operator.assignment.pyke",
+                    "match": "="
+                }
+            ]
+        },
+        "function-def": {
+            "match": "(def)\\s+(\\w+)",
+            "captures": {
+                "1": { "name": "keyword.other.pyke" },
+                "2": { "name": "entity.name.function.pyke" }
+            }
+        },
+        "target-def": {
+            "match": "(target)\\s+(\\w+)",
+            "captures": {
+                "1": { "name": "keyword.other.pyke" },
+                "2": { "name": "entity.name.class.pyke" }
+            }
+        },
+        "import-statement": {
+            "match": "(from)\\s+(\\w+)\\s+(import)",
+            "captures": {
+                "1": { "name": "keyword.other.pyke" },
+                "2": { "name": "entity.name.module.pyke" },
+                "3": { "name": "keyword.other.pyke" }
+            }
+        }
+    }
+}
