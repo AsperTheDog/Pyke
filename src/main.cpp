@@ -4,6 +4,7 @@
 #include "generator.hpp"
 #include "error.hpp"
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -11,6 +12,20 @@
 #include <vector>
 
 namespace fs = std::filesystem;
+
+static std::string toIdentifier(const std::string& p_name)
+{
+    std::string l_out;
+    for (unsigned char l_c : p_name) l_out += (std::isalnum(l_c) || l_c == '_') ? static_cast<char>(l_c) : '_';
+    if (l_out.empty() || std::isdigit(static_cast<unsigned char>(l_out[0]))) l_out.insert(l_out.begin(), '_');
+    return l_out;
+}
+
+static bool isIgnoredDir(const std::string& p_name)
+{
+    return (!p_name.empty() && p_name[0] == '.') || p_name == "node_modules" || p_name == "CMakeFiles" ||
+           p_name == "build" || p_name.rfind("build-", 0) == 0 || p_name.rfind("cmake-build", 0) == 0 || p_name == "out";
+}
 
 int runInit(const std::string& p_dir)
 {
@@ -24,8 +39,15 @@ int runInit(const std::string& p_dir)
     std::vector<std::string> l_sources;
     std::vector<std::string> l_headers;
 
-    for (const fs::directory_entry& l_entry : fs::recursive_directory_iterator(l_root))
+    fs::recursive_directory_iterator l_iter(l_root, fs::directory_options::skip_permission_denied);
+    for (; l_iter != fs::recursive_directory_iterator(); ++l_iter)
     {
+        const fs::directory_entry& l_entry = *l_iter;
+        if (l_entry.is_directory())
+        {
+            if (isIgnoredDir(l_entry.path().filename().string())) l_iter.disable_recursion_pending();
+            continue;
+        }
         if (!l_entry.is_regular_file()) continue;
         std::string l_ext = l_entry.path().extension().string();
         std::string l_rel = fs::relative(l_entry.path(), l_root).generic_string();
@@ -46,11 +68,16 @@ int runInit(const std::string& p_dir)
         return 1;
     }
 
+    std::sort(l_sources.begin(), l_sources.end());
+    std::sort(l_headers.begin(), l_headers.end());
+
     std::string l_projectName = l_root.filename().string();
-    if (l_projectName.empty() || l_projectName == ".")
+    if (l_projectName.empty() || l_projectName == "." || l_projectName == "..")
     {
-        l_projectName = fs::current_path().filename().string();
+        l_projectName = fs::weakly_canonical(l_root).filename().string();
     }
+    std::string l_targetName = toIdentifier(l_projectName);
+    l_projectName = l_targetName;
 
     std::set<std::string> l_sourceDirs;
     for (const std::string& l_s : l_sources)
@@ -83,25 +110,24 @@ int runInit(const std::string& p_dir)
 
     std::string l_targetType = l_hasMain ? "@Executable" : "@SharedLibrary";
     l_out << l_targetType << "\n";
-    l_out << "target " << l_projectName << "():\n";
+    l_out << "target " << l_targetName << "():\n";
     l_out << "    def configure(self):\n";
 
     if (l_useGlob)
     {
-        std::set<std::string> l_globDirs;
+        std::set<std::string> l_globs;
         for (const std::string& l_s : l_sources)
         {
             std::string l_parent = fs::path(l_s).parent_path().generic_string();
-            if (l_parent.empty()) l_parent = ".";
-            l_globDirs.insert(l_parent);
+            std::string l_ext = fs::path(l_s).extension().string();
+            l_globs.insert((l_parent.empty() ? "" : l_parent + "/") + "*" + l_ext);
         }
         l_out << "        self.sources = [";
         bool l_first = true;
-        for (const std::string& l_d : l_globDirs)
+        for (const std::string& l_g : l_globs)
         {
             if (!l_first) l_out << ", ";
-            if (l_d == ".") l_out << "\"*.cpp\"";
-            else l_out << "\"" << l_d << "/*.cpp\"";
+            l_out << "\"" << l_g << "\"";
             l_first = false;
         }
         l_out << "]\n";
@@ -131,7 +157,12 @@ int runInit(const std::string& p_dir)
         l_out << "]\n";
     }
 
-    std::string l_outputFile = (l_root / (l_projectName + ".pyke")).string();
+    std::string l_outputFile = (l_root / (l_root.filename().string().empty() || l_root.filename() == "." ? l_projectName : l_root.filename().string())).string() + ".pyke";
+    if (fs::exists(l_outputFile))
+    {
+        std::cerr << "Error: " << l_outputFile << " already exists; refusing to overwrite it" << std::endl;
+        return 1;
+    }
     std::ofstream l_file(l_outputFile);
     if (!l_file.is_open())
     {

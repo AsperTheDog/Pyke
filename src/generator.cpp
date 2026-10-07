@@ -504,7 +504,11 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
         }
         else
         {
-            p_out += l_ind + "install(TARGETS " + p_target.name + " " + (l_attr == "runtime" ? "RUNTIME" : "LIBRARY") + " DESTINATION " + l_valueStr + ")\n";
+            std::string l_kinds;
+            if (l_attr == "runtime") l_kinds = "RUNTIME DESTINATION " + l_valueStr;
+            else if (p_target.type == TargetType::STATIC_LIBRARY) l_kinds = "ARCHIVE DESTINATION " + l_valueStr; // .a/.lib are archives
+            else l_kinds = "LIBRARY DESTINATION " + l_valueStr + " ARCHIVE DESTINATION " + l_valueStr; // .so plus the Windows import lib
+            p_out += l_ind + "install(TARGETS " + p_target.name + " " + l_kinds + ")\n";
         }
         return;
     }

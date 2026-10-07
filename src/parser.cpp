@@ -40,6 +40,7 @@ Program Parser::parse()
         }
         else if (check(TokenType::PROJECT))
         {
+            if (l_program.project.has_value()) error("duplicate project declaration");
             l_program.project = parseProject();
         }
         else if (check(TokenType::OPTION))
@@ -150,7 +151,18 @@ void Parser::skipCollectionWhitespace()
 
 void Parser::error(const std::string& p_message)
 {
-    m_errors.push_back(p_message);
+    // One error per token position: follow-up errors at the same spot are noise from the first
+    if (m_hasLastError && m_lastErrorPos == m_pos) return;
+    m_hasLastError = true;
+    m_lastErrorPos = m_pos;
+
+    if (p_message.rfind("Line ", 0) == 0)
+    {
+        m_errors.push_back(p_message);
+        return;
+    }
+    const Token& l_tok = peek();
+    m_errors.push_back("Line " + std::to_string(l_tok.line) + ":" + std::to_string(l_tok.column) + ": " + p_message);
 }
 
 void Parser::synchronize()

@@ -361,7 +361,7 @@ void test_gen_install()
     );
 
     std::string& l_lib = l_files["Lib/CMakeLists.txt"];
-    ASSERT_CONTAINS(l_lib, "install(TARGETS Lib LIBRARY DESTINATION \"lib\")", "Library install");
+    ASSERT_CONTAINS(l_lib, "install(TARGETS Lib LIBRARY DESTINATION \"lib\" ARCHIVE DESTINATION \"lib\")", "Library install");
     ASSERT_CONTAINS(l_lib, "install(DIRECTORY \"include/\" DESTINATION \"include/lib\")", "Headers install");
 }
 
@@ -444,7 +444,7 @@ void test_gen_full_example()
     ASSERT_CONTAINS(l_renderer, "target_link_libraries(Renderer PUBLIC Boost::system)", "Link Boost");
     ASSERT_CONTAINS(l_renderer, "if(use_opengl)", "OpenGL condition");
     ASSERT_CONTAINS(l_renderer, "if(MSVC)", "MSVC condition");
-    ASSERT_CONTAINS(l_renderer, "install(TARGETS Renderer LIBRARY DESTINATION \"lib\")", "Install");
+    ASSERT_CONTAINS(l_renderer, "install(TARGETS Renderer LIBRARY DESTINATION \"lib\" ARCHIVE DESTINATION \"lib\")", "Install");
 
     std::string& l_game = l_files["Game/CMakeLists.txt"];
     ASSERT_CONTAINS(l_game, "add_executable(Game)", "Game is executable");
@@ -782,6 +782,15 @@ void test_gen_copy_dlls_guarded_and_source_groups_external()
 }
 
 
+void test_gen_static_library_install_uses_archive()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@StaticLibrary\ntarget L():\n    def configure(self):\n        self.sources = [\"l.cpp\"]\n"
+        "    def install(self):\n        self.library = \"lib\"\n");
+    ASSERT_CONTAINS(l_files["L/CMakeLists.txt"], "install(TARGETS L ARCHIVE DESTINATION \"lib\")", "Static libs install as ARCHIVE");
+}
+
+
 int main()
 {
     std::cout << "=== Pyke Generator Tests ===" << std::endl;
@@ -824,6 +833,7 @@ int main()
     RUN_TEST(test_gen_clang_matches_apple_clang);
     RUN_TEST(test_gen_string_escaping);
     RUN_TEST(test_gen_pch_list);
+    RUN_TEST(test_gen_static_library_install_uses_archive);
     RUN_TEST(test_gen_copy_dlls_guarded_and_source_groups_external);
 
     std::cout << std::endl;

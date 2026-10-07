@@ -65,6 +65,8 @@ private:
 
     const std::vector<Token>& m_tokens;
     size_t m_pos;
+    size_t m_lastErrorPos = 0;
+    bool m_hasLastError = false;
     std::vector<std::string> m_errors;
     std::set<std::string> m_envVariables;
 };
