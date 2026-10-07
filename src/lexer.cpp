@@ -124,6 +124,18 @@ std::vector<Token> Lexer::tokenize()
                     l_tokens.push_back(makeToken(TokenType::EQUALS, "="));
                 }
                 break;
+            case '!':
+                advance();
+                if (!atEnd() && peek() == '=')
+                {
+                    advance();
+                    l_tokens.push_back(makeToken(TokenType::COMPARISON, "!="));
+                }
+                else
+                {
+                    l_tokens.push_back(makeToken(TokenType::ERROR_TOKEN, "Unexpected character '!' (did you mean '!='?)"));
+                }
+                break;
             case '+':
                 advance();
                 if (!atEnd() && peek() == '=')

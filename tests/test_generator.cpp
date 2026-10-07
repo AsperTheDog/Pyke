@@ -343,7 +343,7 @@ void test_gen_if_option()
     );
 
     std::string& l_app = l_files["App/CMakeLists.txt"];
-    ASSERT_CONTAINS(l_app, "if(${use_opengl})", "Option condition");
+    ASSERT_CONTAINS(l_app, "if(use_opengl)", "Option condition");
 }
 
 void test_gen_install()
@@ -442,7 +442,7 @@ void test_gen_full_example()
     ASSERT_CONTAINS(l_renderer, "add_library(Renderer SHARED)", "Renderer is shared");
     ASSERT_CONTAINS(l_renderer, "target_link_libraries(Renderer PRIVATE Core)", "Link Core");
     ASSERT_CONTAINS(l_renderer, "target_link_libraries(Renderer PUBLIC Boost::system)", "Link Boost");
-    ASSERT_CONTAINS(l_renderer, "if(${use_opengl})", "OpenGL condition");
+    ASSERT_CONTAINS(l_renderer, "if(use_opengl)", "OpenGL condition");
     ASSERT_CONTAINS(l_renderer, "if(MSVC)", "MSVC condition");
     ASSERT_CONTAINS(l_renderer, "install(TARGETS Renderer LIBRARY DESTINATION \"lib\")", "Install");
 
@@ -731,6 +731,57 @@ void test_gen_fetch_content()
     ASSERT_CONTAINS(l_app, "target_link_libraries(App PRIVATE spdlog)", "Bare name for fetched");
 }
 
+static const std::string s_proj = "project(\"T\", version=\"1.0.0\", lang=\"c++17\")\n";
+
+void test_gen_not_equal_condition()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"
+        "        if platform != \"windows\":\n            self.flags += [\"-Wall\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "if(NOT (WIN32))", "!= must negate");
+}
+
+void test_gen_build_type_config_names()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"
+        "        if build_type == \"relwithdebinfo\":\n            self.sources += [\"b.cpp\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "\"RelWithDebInfo\"", "Proper CMake config casing");
+}
+
+void test_gen_clang_matches_apple_clang()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"
+        "        if compiler == \"clang\":\n            self.flags += [\"-Wall\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "MATCHES \"Clang\"", "AppleClang must match");
+}
+
+void test_gen_string_escaping()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"
+        "        self.includes = [\"dir with \\\"quote\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "\\\"quote", "Quotes must be escaped");
+}
+
+void test_gen_pch_list()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"
+        "        self.pch = [\"a.hpp\", \"b.hpp\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "target_precompile_headers(A PRIVATE \"a.hpp\" \"b.hpp\")", "pch list");
+}
+
+void test_gen_copy_dlls_guarded_and_source_groups_external()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"../x/a.cpp\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "if(WIN32)\n    add_custom_command", "DLL copy only on Windows");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "External Sources", "Outside sources grouped safely");
+}
+
+
 int main()
 {
     std::cout << "=== Pyke Generator Tests ===" << std::endl;
@@ -768,6 +819,12 @@ int main()
     RUN_TEST(test_gen_ctest);
     RUN_TEST(test_gen_unique_glob_names);
     RUN_TEST(test_gen_fetch_content);
+    RUN_TEST(test_gen_not_equal_condition);
+    RUN_TEST(test_gen_build_type_config_names);
+    RUN_TEST(test_gen_clang_matches_apple_clang);
+    RUN_TEST(test_gen_string_escaping);
+    RUN_TEST(test_gen_pch_list);
+    RUN_TEST(test_gen_copy_dlls_guarded_and_source_groups_external);
 
     std::cout << std::endl;
     std::cout << "Results: " << s_testsPassed << "/" << s_testsRun << " passed";

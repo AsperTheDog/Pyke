@@ -237,8 +237,22 @@ int main(int argc, char* argv[])
         std::stringstream l_ubuf;
         l_ubuf << l_uf.rdbuf();
         pyke::Lexer l_ulexer(l_ubuf.str());
-        pyke::Parser l_uparser(l_ulexer.tokenize());
+        std::vector<pyke::Token> l_utokens = l_ulexer.tokenize();
+        for (const pyke::Token& l_tok : l_utokens)
+        {
+            if (l_tok.type == pyke::TokenType::ERROR_TOKEN)
+            {
+                std::cerr << argv[2] << ":" << l_tok.line << ":" << l_tok.column << ": error: " << l_tok.value << std::endl;
+                return 1;
+            }
+        }
+        pyke::Parser l_uparser(l_utokens);
         pyke::Program l_uprogram = l_uparser.parse();
+        if (l_uparser.hasErrors())
+        {
+            for (const std::string& l_err : l_uparser.errors()) std::cerr << argv[2] << ": " << l_err << std::endl;
+            return 1;
+        }
 
         if (l_uprogram.fetches.empty())
         {
@@ -326,12 +340,18 @@ int main(int argc, char* argv[])
     }
 
     pyke::Analyzer l_analyzer(l_program);
-    if (!l_analyzer.analyze())
+    bool l_analysisOk = l_analyzer.analyze();
+    for (const std::string& l_warn : l_analyzer.warnings())
+    {
+        std::cerr << l_inputPath << ": warning: " << l_warn << std::endl;
+    }
+    if (!l_analysisOk)
     {
         for (const std::string& l_err : l_analyzer.errors())
         {
-            std::cerr << l_inputPath << ": " << l_err << std::endl;
+            std::cerr << l_inputPath << ": error: " << l_err << std::endl;
         }
+        std::cerr << l_analyzer.errors().size() << " error(s); nothing was generated." << std::endl;
         return 1;
     }
 
@@ -344,9 +364,23 @@ int main(int argc, char* argv[])
     pyke::Generator l_generator(l_program);
     std::vector<pyke::GeneratedFile> l_files = l_generator.generate();
 
+    std::error_code l_ec;
+    fs::path l_outRoot = fs::weakly_canonical(fs::path(l_outputDir), l_ec);
+    auto l_isInsideRoot = [&](const fs::path& p_path)
+    {
+        fs::path l_canon = fs::weakly_canonical(p_path, l_ec);
+        std::string l_rel = l_canon.lexically_relative(l_outRoot).generic_string();
+        return !l_ec && !l_rel.empty() && l_rel != ".." && l_rel.rfind("../", 0) != 0;
+    };
+
     for (const pyke::GeneratedFile& l_genFile : l_files)
     {
         fs::path l_outPath = fs::path(l_outputDir) / l_genFile.path;
+        if (!l_isInsideRoot(l_outPath))
+        {
+            std::cerr << "Error: refusing to write outside the output directory: " << l_outPath.string() << std::endl;
+            return 1;
+        }
 
         fs::path l_parent = l_outPath.parent_path();
         if (!l_parent.empty())
@@ -373,6 +407,11 @@ int main(int argc, char* argv[])
         fs::path l_filePath = fs::path(l_outputDir) / l_ref.targetDir / l_ref.file;
 
         if (fs::exists(l_filePath)) continue;
+        if (!l_isInsideRoot(l_filePath))
+        {
+            std::cerr << "warning: skipping stub outside the output directory: " << l_filePath.string() << std::endl;
+            continue;
+        }
 
         fs::path l_parent = l_filePath.parent_path();
         if (!l_parent.empty())
@@ -390,12 +429,11 @@ int main(int argc, char* argv[])
         }
         else if (l_ext == ".cpp" || l_ext == ".cc" || l_ext == ".cxx")
         {
-            fs::path l_header = l_filePath;
-            l_header.replace_extension(".h");
-            if (fs::exists(l_header) || l_ref.file.find("main") != std::string::npos)
-            {
-            }
             l_stub << "// " << l_ref.file << "\n";
+            if (l_filePath.stem() == "main")
+            {
+                l_stub << "\nint main()\n{\n    return 0;\n}\n";
+            }
         }
         else if (l_ext == ".c")
         {

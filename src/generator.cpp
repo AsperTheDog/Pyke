@@ -116,7 +116,7 @@ std::string Generator::generateRoot()
             bool l_conditional = !l_import.condition.empty();
             if (l_conditional)
             {
-                l_out << "if(${" << l_import.condition << "})\n    ";
+                l_out << "if(" << l_import.condition << ")\n    ";
             }
             for (const std::string& l_pkg : l_import.packages)
             {
@@ -264,8 +264,20 @@ std::string Generator::generateTarget(const TargetDecl& p_target)
 
     if (p_target.sourceGroups && p_target.type != TargetType::HEADER_ONLY)
     {
-        l_result += "\nget_target_property(" + p_target.name + "_ALL_SOURCES " + p_target.name + " SOURCES)\n";
-        l_result += "source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${" + p_target.name + "_ALL_SOURCES})\n";
+        // source_group(TREE) is a hard error for files outside the root, so group those separately
+        const std::string& l_n = p_target.name;
+        l_result += "\nget_target_property(" + l_n + "_ALL_SOURCES " + l_n + " SOURCES)\n";
+        l_result += "if(" + l_n + "_ALL_SOURCES)\n";
+        l_result += "    foreach(_src IN LISTS " + l_n + "_ALL_SOURCES)\n";
+        l_result += "        cmake_path(ABSOLUTE_PATH _src BASE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} NORMALIZE OUTPUT_VARIABLE _abs)\n";
+        l_result += "        cmake_path(IS_PREFIX CMAKE_CURRENT_SOURCE_DIR \"${_abs}\" NORMALIZE _inside)\n";
+        l_result += "        if(_inside)\n";
+        l_result += "            source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES \"${_abs}\")\n";
+        l_result += "        else()\n";
+        l_result += "            source_group(\"External Sources\" FILES \"${_abs}\")\n";
+        l_result += "        endif()\n";
+        l_result += "    endforeach()\n";
+        l_result += "endif()\n";
     }
 
     if (p_target.test && p_target.type == TargetType::EXECUTABLE)
@@ -275,12 +287,15 @@ std::string Generator::generateTarget(const TargetDecl& p_target)
 
     if (p_target.copyDlls && p_target.type == TargetType::EXECUTABLE)
     {
-        l_result += "\nadd_custom_command(TARGET " + p_target.name + " POST_BUILD\n";
-        l_result += "    COMMAND ${CMAKE_COMMAND} -E copy_if_different\n";
-        l_result += "        $<TARGET_RUNTIME_DLLS:" + p_target.name + ">\n";
-        l_result += "        $<TARGET_FILE_DIR:" + p_target.name + ">\n";
-        l_result += "    COMMAND_EXPAND_LISTS\n";
-        l_result += ")\n";
+        // TARGET_RUNTIME_DLLS is empty off Windows, which would make copy_if_different fail the build
+        l_result += "\nif(WIN32)\n";
+        l_result += "    add_custom_command(TARGET " + p_target.name + " POST_BUILD\n";
+        l_result += "        COMMAND ${CMAKE_COMMAND} -E copy_if_different\n";
+        l_result += "            $<TARGET_RUNTIME_DLLS:" + p_target.name + ">\n";
+        l_result += "            $<TARGET_FILE_DIR:" + p_target.name + ">\n";
+        l_result += "        COMMAND_EXPAND_LISTS\n";
+        l_result += "    )\n";
+        l_result += "endif()\n";
     }
 
     return l_result;
@@ -320,10 +335,9 @@ void Generator::generateIfStatement(const IfStatement& p_ifStmt, const TargetDec
         {
             auto* l_leftId = std::get_if<Identifier>(&l_cmp->left->value);
             auto* l_rightStr = std::get_if<StringLiteral>(&l_cmp->right->value);
-            if (l_leftId && l_leftId->name == "build_type" && l_rightStr)
+            if (l_leftId && l_leftId->name == "build_type" && l_rightStr && l_cmp->op == "==")
             {
-                std::string l_bt = l_rightStr->value;
-                if (!l_bt.empty()) l_bt[0] = static_cast<char>(toupper(l_bt[0]));
+                std::string l_bt = cmakeConfigName(l_rightStr->value);
                 std::string l_genexConfig = "$<CONFIG:" + l_bt + ">";
 
                 std::string l_ind = indent(p_indentLevel);
@@ -464,16 +478,21 @@ void Generator::emitListCommand(const std::string& p_cmakeCmd, const TargetDecl&
 
 void Generator::generateAssignment(const AssignStatement& p_assign, const TargetDecl& p_target, std::string& p_out, int p_indentLevel)
 {
+    emitAssignment(*p_assign.target, *p_assign.value, p_target, p_out, p_indentLevel);
+}
+
+void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel)
+{
     std::string l_visibility;
-    std::string l_attr = resolveAttribute(*p_assign.target, p_target, l_visibility);
-    std::string l_valueStr = exprToCmake(*p_assign.value);
+    std::string l_attr = resolveAttribute(p_lhs, p_target, l_visibility);
+    std::string l_valueStr = exprToCmake(p_rhs);
     std::string l_ind = indent(p_indentLevel);
 
     if (l_attr == "runtime" || l_attr == "library" || l_attr == "headers")
     {
         if (l_attr == "headers")
         {
-            if (auto* l_tuple = std::get_if<TupleLiteral>(&p_assign.value->value))
+            if (auto* l_tuple = std::get_if<TupleLiteral>(&p_rhs.value))
             {
                 if (l_tuple->elements.size() == 2)
                 {
@@ -492,7 +511,7 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
 
     if (l_attr == "sources")
     {
-        if (auto* l_list = std::get_if<ListLiteral>(&p_assign.value->value))
+        if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
         {
             bool l_hasGlob = false;
             for (const ExprPtr& l_elem : l_list->elements)
@@ -535,14 +554,14 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
         return;
     }
 
-    if (l_attr == "includes") { emitListCommand("target_include_directories", p_target, l_visibility, *p_assign.value, p_out, p_indentLevel); return; }
-    if (l_attr == "flags") { emitListCommand("target_compile_options", p_target, l_visibility, *p_assign.value, p_out, p_indentLevel); return; }
-    if (l_attr == "link_dirs") { emitListCommand("target_link_directories", p_target, l_visibility, *p_assign.value, p_out, p_indentLevel); return; }
+    if (l_attr == "includes") { emitListCommand("target_include_directories", p_target, l_visibility, p_rhs, p_out, p_indentLevel); return; }
+    if (l_attr == "flags") { emitListCommand("target_compile_options", p_target, l_visibility, p_rhs, p_out, p_indentLevel); return; }
+    if (l_attr == "link_dirs") { emitListCommand("target_link_directories", p_target, l_visibility, p_rhs, p_out, p_indentLevel); return; }
 
     if (l_attr == "link")
     {
         p_out += l_ind + "target_link_libraries(" + p_target.name + " " + l_visibility + "\n";
-        if (auto* l_list = std::get_if<ListLiteral>(&p_assign.value->value))
+        if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
         {
             for (const ExprPtr& l_elem : l_list->elements)
             {
@@ -555,7 +574,7 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
 
     if (l_attr == "definitions")
     {
-        if (auto* l_dict = std::get_if<DictLiteral>(&p_assign.value->value))
+        if (auto* l_dict = std::get_if<DictLiteral>(&p_rhs.value))
         {
             for (const std::pair<ExprPtr, ExprPtr>& l_entry : l_dict->entries)
             {
@@ -569,18 +588,27 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
 
     if (l_attr == "pch")
     {
-        p_out += l_ind + "target_precompile_headers(" + p_target.name + " " + l_visibility + " " + l_valueStr + ")\n";
+        p_out += l_ind + "target_precompile_headers(" + p_target.name + " " + l_visibility;
+        if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
+        {
+            for (const ExprPtr& l_elem : l_list->elements) p_out += " " + exprToCmake(*l_elem);
+        }
+        else
+        {
+            p_out += " " + l_valueStr;
+        }
+        p_out += ")\n";
         return;
     }
 
     if (l_attr == "assets")
     {
         std::vector<std::string> l_dirs;
-        if (auto* l_list = std::get_if<ListLiteral>(&p_assign.value->value))
+        if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
         {
             for (const ExprPtr& l_elem : l_list->elements) l_dirs.push_back(exprToCmake(*l_elem));
         }
-        else if (auto* l_str = std::get_if<StringLiteral>(&p_assign.value->value))
+        else if (auto* l_str = std::get_if<StringLiteral>(&p_rhs.value))
         {
             l_dirs.push_back("\"" + l_str->value + "\"");
         }
@@ -597,7 +625,7 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
 
     if (l_attr == "copy_files")
     {
-        if (auto* l_list = std::get_if<ListLiteral>(&p_assign.value->value))
+        if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
         {
             for (const ExprPtr& l_elem : l_list->elements)
             {
@@ -613,7 +641,7 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
 
     if (l_attr == "commands")
     {
-        if (auto* l_list = std::get_if<ListLiteral>(&p_assign.value->value))
+        if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
         {
             for (const ExprPtr& l_elem : l_list->elements)
             {
@@ -666,7 +694,7 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
         return;
     }
 
-    if (auto* l_idx = std::get_if<IndexAccess>(&p_assign.target->value))
+    if (auto* l_idx = std::get_if<IndexAccess>(&p_lhs.value))
     {
         std::string l_baseVis;
         std::string l_baseAttr = resolveAttribute(*l_idx->object, p_target, l_baseVis);
@@ -674,7 +702,7 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
         {
             std::string l_key = exprToCmake(*l_idx->index);
             if (l_key.front() == '"') l_key = l_key.substr(1, l_key.size() - 2);
-            std::string l_val = exprToCmake(*p_assign.value);
+            std::string l_val = exprToCmake(p_rhs);
             p_out += l_ind + "target_compile_definitions(" + p_target.name + " " + l_baseVis + " " + l_key + "=" + l_val + ")\n";
         }
         return;
@@ -684,19 +712,28 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
 void Generator::generateAugAssignment(const AugAssignStatement& p_aug, const TargetDecl& p_target, std::string& p_out, int p_indentLevel)
 {
     // += is equivalent to = for CMake purposes since target_sources etc. accumulate
-    AssignStatement l_equiv;
-    l_equiv.target = std::unique_ptr<Expression>(const_cast<Expression*>(p_aug.target.get()));
-    l_equiv.value = std::unique_ptr<Expression>(const_cast<Expression*>(p_aug.value.get()));
-    generateAssignment(l_equiv, p_target, p_out, p_indentLevel);
-    l_equiv.target.release();
-    l_equiv.value.release();
+    emitAssignment(*p_aug.target, *p_aug.value, p_target, p_out, p_indentLevel);
+}
+
+// Escapes a literal for use inside a CMake quoted argument. Variable references
+// (${...}, $ENV{...}) are intentionally left intact so env imports keep working.
+static std::string escapeCmake(const std::string& p_value)
+{
+    std::string l_out;
+    for (char l_c : p_value)
+    {
+        if (l_c == '"' || l_c == '\\') l_out += '\\';
+        if (l_c == '\n') { l_out += "\\n"; continue; }
+        l_out += l_c;
+    }
+    return l_out;
 }
 
 std::string Generator::exprToCmake(const Expression& p_expr)
 {
     if (auto* l_str = std::get_if<StringLiteral>(&p_expr.value))
     {
-        return "\"" + l_str->value + "\"";
+        return "\"" + escapeCmake(l_str->value) + "\"";
     }
     if (auto* l_num = std::get_if<IntLiteral>(&p_expr.value))
     {
@@ -733,42 +770,59 @@ std::string Generator::conditionToCmake(const Expression& p_expr)
 {
     if (auto* l_cmp = std::get_if<Comparison>(&p_expr.value))
     {
-        auto* l_leftId = std::get_if<Identifier>(&l_cmp->left->value);
-        auto* l_rightStr = std::get_if<StringLiteral>(&l_cmp->right->value);
-
-        if (l_leftId && l_rightStr)
-        {
-            if (l_leftId->name == "platform")
-            {
-                if (l_rightStr->value == "windows") return "WIN32";
-                if (l_rightStr->value == "linux") return "UNIX AND NOT APPLE";
-                if (l_rightStr->value == "macos") return "APPLE";
-            }
-            if (l_leftId->name == "compiler")
-            {
-                if (l_rightStr->value == "msvc") return "MSVC";
-                if (l_rightStr->value == "gcc") return "CMAKE_CXX_COMPILER_ID STREQUAL \"GNU\"";
-                if (l_rightStr->value == "clang") return "CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\"";
-            }
-            if (l_leftId->name == "build_type")
-            {
-                std::string l_bt = l_rightStr->value;
-                if (!l_bt.empty()) l_bt[0] = static_cast<char>(toupper(l_bt[0]));
-                return "CMAKE_BUILD_TYPE STREQUAL \"" + l_bt + "\"";
-            }
-        }
-
-        std::string l_left = conditionToCmake(*l_cmp->left);
-        std::string l_right = conditionToCmake(*l_cmp->right);
-        return l_left + " STREQUAL " + l_right;
+        std::string l_positive = comparisonToCmake(*l_cmp);
+        return l_cmp->op == "!=" ? "NOT (" + l_positive + ")" : l_positive;
     }
 
     if (auto* l_id = std::get_if<Identifier>(&p_expr.value))
     {
-        return "${" + l_id->name + "}";
+        // if(NAME) dereferences the variable itself; "${NAME}" would break on empty values
+        return l_id->name;
+    }
+
+    if (auto* l_b = std::get_if<BoolLiteral>(&p_expr.value))
+    {
+        return l_b->value ? "TRUE" : "FALSE";
     }
 
     return exprToCmake(p_expr);
+}
+
+std::string Generator::comparisonToCmake(const Comparison& p_cmp)
+{
+    auto* l_leftId = std::get_if<Identifier>(&p_cmp.left->value);
+    auto* l_rightStr = std::get_if<StringLiteral>(&p_cmp.right->value);
+
+    if (l_leftId && l_rightStr)
+    {
+        if (l_leftId->name == "platform")
+        {
+            if (l_rightStr->value == "windows") return "WIN32";
+            if (l_rightStr->value == "linux") return "UNIX AND NOT APPLE";
+            if (l_rightStr->value == "macos") return "APPLE";
+        }
+        if (l_leftId->name == "compiler")
+        {
+            if (l_rightStr->value == "msvc") return "MSVC";
+            if (l_rightStr->value == "gcc") return "CMAKE_CXX_COMPILER_ID STREQUAL \"GNU\"";
+            if (l_rightStr->value == "clang") return "CMAKE_CXX_COMPILER_ID MATCHES \"Clang\"";
+        }
+        if (l_leftId->name == "build_type")
+        {
+            return "CMAKE_BUILD_TYPE STREQUAL \"" + cmakeConfigName(l_rightStr->value) + "\"";
+        }
+    }
+
+    return conditionToCmake(*p_cmp.left) + " STREQUAL " + conditionToCmake(*p_cmp.right);
+}
+
+std::string Generator::cmakeConfigName(const std::string& p_buildType)
+{
+    if (p_buildType == "debug") return "Debug";
+    if (p_buildType == "release") return "Release";
+    if (p_buildType == "relwithdebinfo") return "RelWithDebInfo";
+    if (p_buildType == "minsizerel") return "MinSizeRel";
+    return p_buildType;
 }
 
 std::string Generator::resolveAttribute(const Expression& p_targetExpr, const TargetDecl& p_target, std::string& p_visibility)

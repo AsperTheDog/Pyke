@@ -306,3 +306,25 @@ Core/CMakeLists.txt               # Core shared library target
 libs/renderer/CMakeLists.txt      # Renderer shared library target
 Game/CMakeLists.txt               # Game executable target
 ```
+---
+
+## Validation
+
+`pyke` rejects invalid input before writing anything. Errors carry line numbers; warnings never block generation.
+
+**Errors**
+- Missing `project(...)`, invalid project name, non-numeric `version`, or `lang` outside `c++11`–`c++26`
+- Unknown attribute names (e.g. `self.sorces`), attributes in the wrong method (`library` in `configure`), or wrong value types (`sources = 5`)
+- Executable/library targets with no sources (`@HeaderOnly` is exempt)
+- Target paths that are absolute, escape the output directory (`..`), or collide with another target's directory
+- Unknown variables or invalid values in conditions (`platform == "beos"`)
+- Option type/default mismatches and duplicate options
+- Dependency cycles, including ones created through `self.link` (reported once, with the full chain)
+
+**Conditions** support `==` and `!=` against string literals, plus bare bool options (`if use_opengl:`).
+
+**Generated-output guarantees**
+- `source_group` works for sources outside the target directory (grouped under "External Sources")
+- `copy_dlls` is only emitted on Windows, so Linux/macOS builds don't break
+- `build_type` maps to CMake's real config names (`RelWithDebInfo`, `MinSizeRel`) and `compiler == "clang"` also matches AppleClang
+- String literals are escaped; nothing is ever written outside the output directory

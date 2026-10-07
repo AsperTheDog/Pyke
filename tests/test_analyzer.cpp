@@ -56,8 +56,16 @@ static std::vector<TestFailure> s_failures;
         } \
     } while(0)
 
-static bool analyzeSource(const std::string& p_source)
+// Most tests focus on targets; give them the project declaration CMake requires.
+static std::string withProject(const std::string& p_source)
 {
+    if (p_source.find("project(") != std::string::npos) return p_source;
+    return "project(\"T\")\n" + p_source;
+}
+
+static bool analyzeSource(const std::string& p_rawSource)
+{
+    std::string p_source = withProject(p_rawSource);
     pyke::Lexer l_lexer(p_source);
     std::vector<pyke::Token> l_tokens = l_lexer.tokenize();
     pyke::Parser l_parser(l_tokens);
@@ -67,8 +75,9 @@ static bool analyzeSource(const std::string& p_source)
     return l_analyzer.analyze();
 }
 
-static std::vector<std::string> analyzeErrors(const std::string& p_source)
+static std::vector<std::string> analyzeErrors(const std::string& p_rawSource)
 {
+    std::string p_source = withProject(p_rawSource);
     pyke::Lexer l_lexer(p_source);
     std::vector<pyke::Token> l_tokens = l_lexer.tokenize();
     pyke::Parser l_parser(l_tokens);
@@ -289,6 +298,92 @@ void test_valid_configure_and_install()
     ASSERT_TRUE(analyzeSource(l_source), "configure + install should pass");
 }
 
+static const std::string s_exe = "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n";
+
+static bool anyErrorContains(const std::string& p_source, const std::string& p_needle)
+{
+    for (const std::string& l_e : analyzeErrors(p_source))
+    {
+        if (l_e.find(p_needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+void test_missing_project()
+{
+    pyke::Lexer l_lexer(s_exe);
+    pyke::Parser l_parser(l_lexer.tokenize());
+    pyke::Program l_program = l_parser.parse();
+    pyke::Analyzer l_analyzer(l_program);
+    ASSERT_FALSE(l_analyzer.analyze(), "Program without project must fail");
+    ASSERT_TRUE(l_analyzer.errors()[0].find("missing project") != std::string::npos, "Missing project should be reported");
+}
+
+void test_invalid_project_fields()
+{
+    ASSERT_TRUE(anyErrorContains("project(\"A\", version=\"x.y\")\n" + s_exe, "invalid project version"), "Bad version");
+    ASSERT_TRUE(anyErrorContains("project(\"A\", lang=\"rust\")\n" + s_exe, "unsupported lang"), "Bad lang");
+    ASSERT_TRUE(anyErrorContains("project(\"A b\")\n" + s_exe, "invalid project name"), "Bad name");
+}
+
+void test_unknown_attribute()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sorces = [\"a.cpp\"]\n", "unknown attribute 'sorces'"), "Typo in attribute");
+}
+
+void test_attribute_type_checks()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = 5\n", "'sources' expects a list"), "Non-list sources");
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.definitions = [\"X\"]\n", "'definitions' expects a dict"), "Non-dict definitions");
+}
+
+void test_install_attr_in_configure()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.library = \"lib\"\n", "only valid inside install()"), "install attr in configure");
+}
+
+void test_no_sources()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.flags = [\"-Wall\"]\n", "no sources"), "Target without sources");
+    ASSERT_TRUE(analyzeSource("@HeaderOnly\ntarget H():\n    def configure(self):\n        self.exports.includes = [\"include/\"]\n"), "Header-only needs no sources");
+}
+
+void test_duplicate_and_escaping_paths()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable(\"d\")\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n@Executable(\"d/\")\ntarget B():\n    def configure(self):\n        self.sources = [\"b.cpp\"]\n", "already used"), "Duplicate dir");
+    ASSERT_TRUE(anyErrorContains("@Executable(\"../out\")\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n", "stay inside"), "Path traversal");
+    ASSERT_TRUE(anyErrorContains("@Executable(\"/abs\")\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n", "stay inside"), "Absolute path");
+}
+
+void test_condition_validation()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        if platform == \"beos\":\n            self.flags += [\"-x\"]\n", "not a valid value for platform"), "Bad platform");
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        if nope:\n            self.flags += [\"-x\"]\n", "unknown variable 'nope'"), "Unknown condition var");
+}
+
+void test_option_validation()
+{
+    ASSERT_TRUE(anyErrorContains("option x: bool = \"s\"\n" + s_exe, "must be True or False"), "Bad bool default");
+    ASSERT_TRUE(anyErrorContains("option x: bool = True\noption x: bool = False\n" + s_exe, "duplicate option"), "Duplicate option");
+}
+
+void test_cycle_reported_once_with_chain()
+{
+    std::vector<std::string> l_errs = analyzeErrors(
+        "@StaticLibrary\ntarget A(B):\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"
+        "@StaticLibrary\ntarget B(A):\n    def configure(self):\n        self.sources = [\"b.cpp\"]\n");
+    ASSERT_EQ(l_errs.size(), static_cast<size_t>(1), "Exactly one cycle error");
+    ASSERT_TRUE(l_errs[0].find("'A' -> 'B' -> 'A'") != std::string::npos, "Full chain reported");
+}
+
+void test_cycle_via_configure_link()
+{
+    ASSERT_TRUE(anyErrorContains(
+        "@StaticLibrary\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.link += [B]\n"
+        "@StaticLibrary\ntarget B(A):\n    def configure(self):\n        self.sources = [\"b.cpp\"]\n", "Circular dependency"), "Cycle through self.link");
+}
+
+
 int main()
 {
     std::cout << "=== Pyke Analyzer Tests ===" << std::endl;
@@ -306,6 +401,17 @@ int main()
     RUN_TEST(test_three_way_cycle);
     RUN_TEST(test_valid_full_example);
     RUN_TEST(test_valid_configure_and_install);
+    RUN_TEST(test_missing_project);
+    RUN_TEST(test_invalid_project_fields);
+    RUN_TEST(test_unknown_attribute);
+    RUN_TEST(test_attribute_type_checks);
+    RUN_TEST(test_install_attr_in_configure);
+    RUN_TEST(test_no_sources);
+    RUN_TEST(test_duplicate_and_escaping_paths);
+    RUN_TEST(test_condition_validation);
+    RUN_TEST(test_option_validation);
+    RUN_TEST(test_cycle_reported_once_with_chain);
+    RUN_TEST(test_cycle_via_configure_link);
 
     std::cout << std::endl;
     std::cout << "Results: " << s_testsPassed << "/" << s_testsRun << " passed";
