@@ -1,0 +1,20 @@
+# The classic layout: include/ + src/ library, an app, and tests.
+# Each target's directory holds its CMakeLists.txt, so `src/` is the library's directory.
+
+project("Greeter", version="1.2.3", lang="c++17")
+
+@StaticLibrary("src")
+target greeter():
+    def configure(self):
+        self.sources = ["*.cpp"]
+        self.exports.includes = ["../include"]
+
+@Executable("app")
+target greeter_cli(PRIVATE greeter):
+    def configure(self):
+        self.sources = ["main.cpp"]
+
+@Executable("tests", test=True)
+target greeter_tests(PRIVATE greeter):
+    def configure(self):
+        self.sources = ["test.cpp"]

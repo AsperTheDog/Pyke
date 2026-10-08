@@ -26,7 +26,7 @@ Program Parser::parse()
                 {
                     l_program.env_imports.push_back(parseEnvImport());
                 }
-                else if (l_moduleName == "github")
+                else if (l_moduleName == "github" || l_moduleName == "vendor")
                 {
                     l_program.fetches.push_back(parseFetch());
                 }
@@ -231,6 +231,7 @@ ImportDecl Parser::parseImport()
             l_decl.packages.push_back(peek().value);
             claimName(peek().value, peek().line);
             advance();
+            l_decl.specs.push_back(parsePackageSpec());
         }
         else
         {
@@ -253,6 +254,60 @@ ImportDecl Parser::parseImport()
     }
 
     return l_decl;
+}
+
+// Optional `(version, optional=True, config=True)` after a package name
+PackageSpec Parser::parsePackageSpec()
+{
+    PackageSpec l_spec;
+    if (!match(TokenType::LEFT_PAREN)) return l_spec;
+
+    bool l_first = true;
+    while (!check(TokenType::RIGHT_PAREN) && !atEnd() && !check(TokenType::NEWLINE))
+    {
+        if (!l_first && !match(TokenType::COMMA)) break;
+        l_first = false;
+        if (check(TokenType::RIGHT_PAREN)) break;
+
+        if (check(TokenType::INT_LITERAL) || check(TokenType::STRING_LITERAL))
+        {
+            if (!l_spec.version.empty()) error("A package takes only one version");
+            if (check(TokenType::STRING_LITERAL))
+            {
+                l_spec.version = peek().value;
+                advance();
+            }
+            else
+            {
+                l_spec.version = peek().value;
+                advance();
+                while (check(TokenType::DOT) && m_pos + 1 < m_tokens.size() && m_tokens[m_pos + 1].type == TokenType::INT_LITERAL)
+                {
+                    advance();
+                    l_spec.version += "." + peek().value;
+                    advance();
+                }
+            }
+        }
+        else if (check(TokenType::IDENTIFIER) && (peek().value == "optional" || peek().value == "config"))
+        {
+            std::string l_key = peek().value;
+            advance();
+            expect(TokenType::EQUALS, "Expected '=' after '" + l_key + "'");
+            bool l_value = true;
+            if (match(TokenType::TRUE_KW)) l_value = true;
+            else if (match(TokenType::FALSE_KW)) l_value = false;
+            else error("Expected True or False for '" + l_key + "'");
+            (l_key == "optional" ? l_spec.optional : l_spec.config) = l_value;
+        }
+        else
+        {
+            error("Expected a version, 'optional=True' or 'config=True'");
+            break;
+        }
+    }
+    expect(TokenType::RIGHT_PAREN, "Expected ')' after the package settings");
+    return l_spec;
 }
 
 EnvImport Parser::parseEnvImport()
@@ -289,6 +344,7 @@ FetchDecl Parser::parseFetch()
     l_decl.line = peek().line;
 
     expect(TokenType::FROM, "Expected 'from'");
+    l_decl.local = check(TokenType::IDENTIFIER) && peek().value == "vendor";
     expect(TokenType::IDENTIFIER, "Expected 'github'");
     expect(TokenType::IMPORT, "Expected 'import'");
 
@@ -299,7 +355,7 @@ FetchDecl Parser::parseFetch()
     }
     else
     {
-        error("Expected repository string like \"user/repo\"");
+        error(l_decl.local ? "Expected a folder string like \"third_party/lz4\"" : "Expected repository string like \"user/repo\"");
     }
 
     expect(TokenType::AS, "Expected 'as'");
@@ -314,17 +370,65 @@ FetchDecl Parser::parseFetch()
         error("Expected name after 'as'");
     }
 
-    if (match(TokenType::COMMA))
+    while (match(TokenType::COMMA))
     {
-        if (check(TokenType::IDENTIFIER) && peek().value == "tag")
+        if (!check(TokenType::IDENTIFIER) || (peek().value != "tag" && peek().value != "options"))
         {
-            advance();
-            expect(TokenType::EQUALS, "Expected '='");
-            if (check(TokenType::STRING_LITERAL))
+            error(l_decl.local ? "Expected 'options={...}' after the import name" : "Expected 'tag=\"...\"' or 'options={...}' after the import name");
+            break;
+        }
+        std::string l_key = peek().value;
+        if (l_decl.local && l_key == "tag")
+        {
+            error("Vendored folders have no 'tag'; only 'options={...}' applies");
+            break;
+        }
+        advance();
+        expect(TokenType::EQUALS, "Expected '='");
+        if (l_key == "tag")
+        {
+            if (check(TokenType::STRING_LITERAL) || check(TokenType::FSTRING_LITERAL))
             {
                 l_decl.tag = peek().value;
                 advance();
             }
+            else
+            {
+                error("Expected a string for 'tag'");
+            }
+        }
+        else
+        {
+            ExprPtr l_value = parseExpression();
+            auto* l_dict = l_value ? std::get_if<DictLiteral>(&l_value->value) : nullptr;
+            if (!l_dict)
+            {
+                error("Expected a dict like {\"OPTION\": False} for 'options'");
+                break;
+            }
+            for (auto& l_entry : l_dict->entries)
+            {
+                auto* l_name = std::get_if<StringLiteral>(&l_entry.first->value);
+                if (!l_name)
+                {
+                    errorAt(l_entry.first->line, l_entry.first->column, "option names in 'options' must be strings");
+                    continue;
+                }
+                l_decl.options.emplace_back(l_name->value, std::move(l_entry.second));
+            }
+        }
+    }
+
+    if (match(TokenType::IF))
+    {
+        if (check(TokenType::IDENTIFIER))
+        {
+            l_decl.condition = peek().value;
+            advance();
+        }
+        else
+        {
+            error("Expected option name after 'if'");
         }
     }
 
@@ -356,12 +460,23 @@ ProjectDecl Parser::parseProject()
             std::string l_key = peek().value;
             advance();
             expect(TokenType::EQUALS, "Expected '=' after keyword");
-            if (check(TokenType::STRING_LITERAL))
+            if (l_key == "lang" && check(TokenType::LEFT_BRACKET))
+            {
+                advance();
+                while (check(TokenType::STRING_LITERAL))
+                {
+                    l_decl.langs.push_back(peek().value);
+                    advance();
+                    if (!match(TokenType::COMMA)) break;
+                }
+                expect(TokenType::RIGHT_BRACKET, "Expected ']' after lang list");
+            }
+            else if (check(TokenType::STRING_LITERAL))
             {
                 std::string l_val = peek().value;
                 advance();
                 if (l_key == "version") l_decl.version = l_val;
-                else if (l_key == "lang") l_decl.lang = l_val;
+                else if (l_key == "lang") l_decl.langs.push_back(l_val);
                 else if (l_key == "output_dir") l_decl.outputDir = l_val;
                 else error("Unknown project keyword: " + l_key);
             }

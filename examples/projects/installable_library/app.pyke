@@ -1,0 +1,21 @@
+# A library other projects can find_package(): self.export installs a MyLibConfig.cmake and the MyLib:: targets.
+# consumer/ is a plain CMake project that uses the installed result (tests/run_examples.sh builds it).
+
+from packages import Threads
+
+project("MyLib", version="1.4.0", lang="c++17")
+
+@StaticLibrary("mylib/src")
+target mylib(PUBLIC Threads):
+    def configure(self):
+        self.sources = ["mylib.cpp"]
+        self.exports.includes = ["../include"]
+    def install(self):
+        self.export = "MyLib"
+        self.library = "lib"
+        self.headers = ("../include/", "include")
+
+@Executable("cli")
+target cli(PRIVATE mylib):
+    def configure(self):
+        self.sources = ["main.cpp"]

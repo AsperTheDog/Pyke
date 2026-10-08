@@ -3,8 +3,10 @@
 #include "analyzer.hpp"
 #include "generator.hpp"
 #include "error.hpp"
+#include "format.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -176,73 +178,249 @@ int runInit(const std::string& p_dir)
     return 0;
 }
 
-int runFmt(const std::string& p_path)
+// Matches one path component against a pattern with * and ?
+bool globMatch(const std::string& p_pattern, const std::string& p_text, size_t p_pi = 0, size_t p_ti = 0)
 {
-    std::ifstream l_in(p_path);
-    if (!l_in.is_open())
+    while (p_pi < p_pattern.size())
     {
-        std::cerr << "Error: Could not open file: " << p_path << std::endl;
-        return 1;
-    }
-
-    std::vector<std::string> l_lines;
-    std::string l_line;
-    while (std::getline(l_in, l_line))
-    {
-        while (!l_line.empty() && (l_line.back() == ' ' || l_line.back() == '\t' || l_line.back() == '\r'))
+        if (p_pattern[p_pi] == '*')
         {
-            l_line.pop_back();
-        }
-        l_lines.push_back(l_line);
-    }
-    l_in.close();
-
-    while (!l_lines.empty() && l_lines.back().empty())
-    {
-        l_lines.pop_back();
-    }
-
-    std::vector<std::string> l_formatted;
-    int l_consecutiveBlank = 0;
-    for (const std::string& l_l : l_lines)
-    {
-        if (l_l.empty())
-        {
-            l_consecutiveBlank++;
-            if (l_consecutiveBlank <= 1)
+            for (size_t l_skip = p_ti; l_skip <= p_text.size(); ++l_skip)
             {
-                l_formatted.push_back(l_l);
+                if (globMatch(p_pattern, p_text, p_pi + 1, l_skip)) return true;
             }
+            return false;
         }
-        else
+        if (p_ti >= p_text.size()) return false;
+        if (p_pattern[p_pi] != '?' && p_pattern[p_pi] != p_text[p_ti]) return false;
+        ++p_pi;
+        ++p_ti;
+    }
+    return p_ti == p_text.size();
+}
+
+// Files under p_root matching a pattern like "src/*.cpp" (wildcards allowed in any component)
+void globExpand(const fs::path& p_dir, const std::vector<std::string>& p_parts, size_t p_index, std::vector<fs::path>& p_out)
+{
+    std::error_code l_ec;
+    if (p_index == p_parts.size()) return;
+    const std::string& l_part = p_parts[p_index];
+    bool l_last = p_index + 1 == p_parts.size();
+    if (l_part.find_first_of("*?") == std::string::npos)
+    {
+        fs::path l_next = p_dir / l_part;
+        if (l_last) { if (fs::is_regular_file(l_next, l_ec)) p_out.push_back(l_next); }
+        else globExpand(l_next, p_parts, p_index + 1, p_out);
+        return;
+    }
+    for (fs::directory_iterator l_it(p_dir, l_ec), l_end; !l_ec && l_it != l_end; l_it.increment(l_ec))
+    {
+        if (!globMatch(l_part, l_it->path().filename().string())) continue;
+        if (l_last) { if (l_it->is_regular_file(l_ec)) p_out.push_back(l_it->path()); }
+        else if (l_it->is_directory(l_ec)) globExpand(l_it->path(), p_parts, p_index + 1, p_out);
+    }
+}
+
+bool isCompiledSource(const fs::path& p_path)
+{
+    static const std::set<std::string> s_exts = {".c", ".cc", ".cpp", ".cxx", ".c++"};
+    return s_exts.count(p_path.extension().string()) > 0;
+}
+
+// Warns about globs that match nothing and about source files next to a target that none of its patterns pick up
+void checkSources(const pyke::Generator& p_generator, const fs::path& p_outRoot)
+{
+    std::set<std::string> l_targetDirs;
+    for (const pyke::Generator::SourceSet& l_set : p_generator.sourceSets()) l_targetDirs.insert(l_set.targetDir);
+
+    for (const pyke::Generator::SourceSet& l_set : p_generator.sourceSets())
+    {
+        std::set<std::string> l_covered;
+        for (const std::string& l_entry : l_set.entries)
         {
-            l_consecutiveBlank = 0;
-            l_formatted.push_back(l_l);
+            if (l_entry.find_first_of("*?") == std::string::npos)
+            {
+                l_covered.insert(l_entry);
+                continue;
+            }
+            std::vector<std::string> l_parts;
+            std::stringstream l_stream(l_entry);
+            for (std::string l_p; std::getline(l_stream, l_p, '/');) if (!l_p.empty()) l_parts.push_back(l_p);
+            std::vector<fs::path> l_found;
+            globExpand(p_outRoot, l_parts, 0, l_found);
+            if (l_found.empty())
+            {
+                std::cerr << "warning: target '" << l_set.target << "': pattern \"" << l_entry << "\" matches no files; CMake will fail to configure if the target has no other sources" << std::endl;
+            }
+            for (const fs::path& l_file : l_found) l_covered.insert(fs::relative(l_file, p_outRoot).generic_string());
+        }
+
+        // Files in the target's own folder that no entry mentions (skipped for the project root, where everything lives)
+        if (l_set.targetDir == "." || l_set.targetDir.empty()) continue;
+        std::error_code l_ec;
+        std::vector<std::string> l_missed;
+        for (fs::recursive_directory_iterator l_it(p_outRoot / l_set.targetDir, l_ec), l_end; !l_ec && l_it != l_end; l_it.increment(l_ec))
+        {
+            if (l_it->is_directory(l_ec))
+            {
+                std::string l_rel = fs::relative(l_it->path(), p_outRoot).generic_string();
+                if (l_targetDirs.count(l_rel) || fs::exists(l_it->path() / "CMakeLists.txt", l_ec)) l_it.disable_recursion_pending();
+                continue;
+            }
+            if (!isCompiledSource(l_it->path())) continue;
+            std::string l_rel = fs::relative(l_it->path(), p_outRoot).generic_string();
+            if (!l_covered.count(l_rel)) l_missed.push_back(l_rel);
+        }
+        if (!l_missed.empty())
+        {
+            std::cerr << "warning: target '" << l_set.target << "': " << l_missed.size() << " source file(s) in its folder are not in 'sources': ";
+            for (size_t l_i = 0; l_i < l_missed.size() && l_i < 3; ++l_i) std::cerr << (l_i ? ", " : "") << l_missed[l_i];
+            if (l_missed.size() > 3) std::cerr << ", ...";
+            std::cerr << std::endl;
         }
     }
+}
 
-    std::ofstream l_out(p_path);
-    if (!l_out.is_open())
+// ---- pyke build / pyke test ------------------------------------------------------------------------------------
+
+struct BuildOptions
+{
+    bool runTests = false;
+    std::string config = "Release";
+    std::string target;
+    std::string jobs;
+    std::string input;
+};
+
+std::string shellQuote(const std::string& p_arg)
+{
+    return "\"" + p_arg + "\"";
+}
+
+int runCommand(const std::vector<std::string>& p_args)
+{
+    std::string l_command;
+    for (const std::string& l_arg : p_args) l_command += (l_command.empty() ? "" : " ") + shellQuote(l_arg);
+    std::cout << "$ " << l_command << std::endl;
+#ifdef _WIN32
+    l_command = "\"" + l_command + "\""; // cmd.exe strips the outer quotes
+#endif
+    return std::system(l_command.c_str());
+}
+
+bool toolAvailable(const std::string& p_tool)
+{
+#ifdef _WIN32
+    std::string l_command = p_tool + " --version > nul 2>&1";
+#else
+    std::string l_command = p_tool + " --version > /dev/null 2>&1";
+#endif
+    return std::system(l_command.c_str()) == 0;
+}
+
+// The single .pyke file in the current directory, or an empty string
+std::string findProjectFile()
+{
+    std::vector<std::string> l_found;
+    std::error_code l_ec;
+    for (fs::directory_iterator l_it(".", l_ec), l_end; !l_ec && l_it != l_end; l_it.increment(l_ec))
     {
-        std::cerr << "Error: Could not write: " << p_path << std::endl;
+        if (l_it->is_regular_file(l_ec) && l_it->path().extension() == ".pyke") l_found.push_back(l_it->path().filename().string());
+    }
+    if (l_found.size() == 1) return l_found[0];
+    if (l_found.empty()) std::cerr << "Error: no .pyke file in the current directory; pass one: pyke build <input.pyke>" << std::endl;
+    else std::cerr << "Error: several .pyke files here; pass one: pyke build <input.pyke>" << std::endl;
+    return "";
+}
+
+// Configure + build (+ ctest) in <root>/build, after the CMake files have been generated into <root>
+int runBuild(const BuildOptions& p_opts, const fs::path& p_root)
+{
+    if (!toolAvailable("cmake"))
+    {
+        std::cerr << "Error: cmake was not found on PATH; install CMake to build" << std::endl;
         return 1;
     }
-    for (const std::string& l_l : l_formatted)
+    fs::path l_buildDir = p_root / "build";
+    std::vector<std::string> l_configure = {"cmake", "-S", p_root.string(), "-B", l_buildDir.string(), "-DCMAKE_BUILD_TYPE=" + p_opts.config};
+    if (!fs::exists(l_buildDir / "CMakeCache.txt") && toolAvailable("ninja")) l_configure.insert(l_configure.end(), {"-G", "Ninja"});
+    if (runCommand(l_configure) != 0) return 1;
+
+    std::vector<std::string> l_build = {"cmake", "--build", l_buildDir.string(), "--config", p_opts.config};
+    if (!p_opts.target.empty()) l_build.insert(l_build.end(), {"--target", p_opts.target});
+    if (!p_opts.jobs.empty()) l_build.insert(l_build.end(), {"--parallel", p_opts.jobs});
+    else l_build.push_back("--parallel");
+    if (runCommand(l_build) != 0) return 1;
+
+    if (p_opts.runTests)
     {
-        l_out << l_l << "\n";
+        if (runCommand({"ctest", "--test-dir", l_buildDir.string(), "-C", p_opts.config, "--output-on-failure"}) != 0) return 1;
     }
-    std::cout << "Formatted: " << p_path << std::endl;
     return 0;
+}
+
+// Formats each file in place; with p_check only reports files that are not formatted (exit 1 if any)
+int runFmt(const std::vector<std::string>& p_paths, bool p_check)
+{
+    int l_status = 0;
+    for (const std::string& l_path : p_paths)
+    {
+        std::ifstream l_in(l_path, std::ios::binary);
+        if (!l_in.is_open())
+        {
+            std::cerr << "Error: Could not open file: " << l_path << std::endl;
+            l_status = 1;
+            continue;
+        }
+        std::stringstream l_buffer;
+        l_buffer << l_in.rdbuf();
+        l_in.close();
+        std::string l_source = l_buffer.str();
+
+        std::string l_error;
+        std::string l_formatted = pyke::formatSource(l_source, &l_error);
+        if (!l_error.empty())
+        {
+            std::cerr << l_path << ": " << l_error << std::endl;
+            l_status = 1;
+            continue;
+        }
+
+        if (l_formatted == l_source)
+        {
+            if (!p_check) std::cout << "Already formatted: " << l_path << std::endl;
+            continue;
+        }
+        if (p_check)
+        {
+            std::cout << "Would reformat: " << l_path << std::endl;
+            l_status = 1;
+            continue;
+        }
+
+        std::ofstream l_out(l_path, std::ios::binary);
+        if (!l_out.is_open())
+        {
+            std::cerr << "Error: Could not write: " << l_path << std::endl;
+            l_status = 1;
+            continue;
+        }
+        l_out << l_formatted;
+        std::cout << "Formatted: " << l_path << std::endl;
+    }
+    return l_status;
 }
 
 int main(int argc, char* argv[])
 {
     // --clean is a modifier: remove files an earlier run generated that are no longer produced
     bool l_clean = false;
+    bool l_force = false;
     std::vector<char*> l_argvFiltered;
     for (int l_i = 0; l_i < argc; l_i++)
     {
         if (l_i > 0 && std::string(argv[l_i]) == "--clean") l_clean = true;
+        else if (l_i > 0 && std::string(argv[l_i]) == "--force") l_force = true;
         else l_argvFiltered.push_back(argv[l_i]);
     }
     argc = static_cast<int>(l_argvFiltered.size());
@@ -250,10 +428,11 @@ int main(int argc, char* argv[])
 
     if (argc < 2)
     {
-        std::cerr << "Usage: pyke [--clean] <input.pyke> [output_dir]" << std::endl;
+        std::cerr << "Usage: pyke [--clean] [--force] <input.pyke> [output_dir]" << std::endl;
+        std::cerr << "       pyke build|test [input.pyke] [--release|--debug] [--target <name>] [-j <jobs>]" << std::endl;
         std::cerr << "       pyke --init [directory]" << std::endl;
         std::cerr << "       pyke --validate <input.pyke>" << std::endl;
-        std::cerr << "       pyke --fmt <input.pyke>" << std::endl;
+        std::cerr << "       pyke --fmt [--check] <input.pyke>..." << std::endl;
         std::cerr << "       pyke --upgrade <input.pyke>" << std::endl;
         return 1;
     }
@@ -324,16 +503,50 @@ int main(int argc, char* argv[])
 
     if (l_firstArg == "--fmt")
     {
-        if (argc < 3)
+        bool l_check = false;
+        std::vector<std::string> l_paths;
+        for (int l_i = 2; l_i < argc; ++l_i)
         {
-            std::cerr << "Usage: pyke --fmt <input.pyke>" << std::endl;
+            if (std::string(argv[l_i]) == "--check") l_check = true;
+            else l_paths.push_back(argv[l_i]);
+        }
+        if (l_paths.empty())
+        {
+            std::cerr << "Usage: pyke --fmt [--check] <input.pyke>..." << std::endl;
             return 1;
         }
-        return runFmt(argv[2]);
+        return runFmt(l_paths, l_check);
+    }
+
+    bool l_buildMode = false;
+    BuildOptions l_build;
+    if (l_firstArg == "build" || l_firstArg == "test")
+    {
+        l_buildMode = true;
+        l_build.runTests = l_firstArg == "test";
+        for (int l_i = 2; l_i < argc; ++l_i)
+        {
+            std::string l_arg = argv[l_i];
+            if (l_arg == "--release") l_build.config = "Release";
+            else if (l_arg == "--debug") l_build.config = "Debug";
+            else if ((l_arg == "--target" || l_arg == "-j") && l_i + 1 < argc) (l_arg == "-j" ? l_build.jobs : l_build.target) = argv[++l_i];
+            else if (!l_arg.empty() && l_arg[0] != '-' && l_build.input.empty()) l_build.input = l_arg;
+            else
+            {
+                std::cerr << "Usage: pyke " << l_firstArg << " [input.pyke] [--release|--debug] [--target <name>] [-j <jobs>]" << std::endl;
+                return 1;
+            }
+        }
+        if (l_build.input.empty()) l_build.input = findProjectFile();
+        if (l_build.input.empty()) return 1;
     }
 
     bool l_validateOnly = false;
-    if (l_firstArg == "--validate")
+    if (l_buildMode)
+    {
+        l_firstArg = l_build.input;
+    }
+    else if (l_firstArg == "--validate")
     {
         l_validateOnly = true;
         if (argc < 3)
@@ -346,6 +559,11 @@ int main(int argc, char* argv[])
 
     std::string l_inputPath = l_firstArg;
     std::string l_outputDir = l_validateOnly ? "" : ((argc >= 3) ? argv[2] : ".");
+    if (l_buildMode)
+    {
+        l_outputDir = fs::path(l_inputPath).parent_path().string(); // generate next to the .pyke file
+        if (l_outputDir.empty()) l_outputDir = ".";
+    }
 
     std::ifstream l_file(l_inputPath);
     if (!l_file.is_open())
@@ -433,17 +651,57 @@ int main(int argc, char* argv[])
     std::vector<pyke::GeneratedFile> l_files = l_generator.generate();
 
     std::error_code l_ec;
-    fs::path l_outRoot = fs::weakly_canonical(fs::path(l_outputDir), l_ec);
+    // Purely lexical (absolute + normalised) so it behaves the same on every platform; weakly_canonical mishandles ".\\file" on Windows
+    auto l_normalize = [](const fs::path& p_path)
+    {
+        fs::path l_abs = fs::absolute(p_path).lexically_normal();
+        if (!l_abs.has_filename()) l_abs = l_abs.parent_path(); // drop the trailing separator left by "dir/."
+        return l_abs;
+    };
+    fs::path l_outRoot = l_normalize(fs::path(l_outputDir));
     auto l_isInsideRoot = [&](const fs::path& p_path)
     {
-        std::error_code l_innerEc;
-        fs::path l_canon = fs::weakly_canonical(p_path, l_innerEc);
-        std::string l_rel = l_canon.lexically_relative(l_outRoot).generic_string();
-        return !l_innerEc && !l_rel.empty() && l_rel != ".." && l_rel.rfind("../", 0) != 0;
+        std::string l_rel = l_normalize(p_path).lexically_relative(l_outRoot).generic_string();
+        return !l_rel.empty() && l_rel != "." && l_rel != ".." && l_rel.rfind("../", 0) != 0;
     };
 
     const std::string l_headerPrefix = "# Generated by pyke";
     const std::string l_header = l_headerPrefix + " from " + fs::path(l_inputPath).filename().string() + " - do not edit, changes will be overwritten.\n";
+
+    // The manifest remembers what we generated so files from removed targets can be reported
+    fs::path l_manifestPath = fs::path(l_outputDir) / ".pyke" / "generated";
+    std::set<std::string> l_previous;
+    {
+        std::ifstream l_in(l_manifestPath);
+        std::string l_line;
+        while (std::getline(l_in, l_line))
+        {
+            if (!l_line.empty()) l_previous.insert(l_line);
+        }
+    }
+
+    // Never overwrite a file pyke didn't write (e.g. a hand-written CMakeLists.txt): it carries our header or is in the manifest
+    if (!l_force)
+    {
+        std::vector<std::string> l_foreign;
+        for (const pyke::GeneratedFile& l_genFile : l_files)
+        {
+            fs::path l_outPath = fs::path(l_outputDir) / l_genFile.path;
+            std::ifstream l_in(l_outPath, std::ios::binary);
+            if (!l_in.is_open()) continue;
+            std::string l_firstLine;
+            std::getline(l_in, l_firstLine);
+            bool l_empty = l_in.peek() == std::ifstream::traits_type::eof() && l_firstLine.empty();
+            bool l_ours = l_firstLine.rfind(l_headerPrefix, 0) == 0 || l_previous.count(fs::path(l_genFile.path).generic_string());
+            if (!l_empty && !l_ours) l_foreign.push_back(l_outPath.string());
+        }
+        if (!l_foreign.empty())
+        {
+            for (const std::string& l_path : l_foreign) std::cerr << "error: " << l_path << " already exists and was not generated by pyke" << std::endl;
+            std::cerr << "Nothing was written. Move those files away, choose another output directory (pyke " << l_inputPath << " <output_dir>), or pass --force to overwrite them." << std::endl;
+            return 1;
+        }
+    }
 
     int l_written = 0, l_unchanged = 0;
     std::set<std::string> l_generatedPaths;
@@ -505,17 +763,6 @@ int main(int argc, char* argv[])
 
     std::cout << "Done. " << l_written << " written, " << l_unchanged << " unchanged." << std::endl;
 
-    // The manifest remembers what we generated so files from removed targets can be reported
-    fs::path l_manifestPath = fs::path(l_outputDir) / ".pyke" / "generated";
-    std::set<std::string> l_previous;
-    {
-        std::ifstream l_in(l_manifestPath);
-        std::string l_line;
-        while (std::getline(l_in, l_line))
-        {
-            if (!l_line.empty()) l_previous.insert(l_line);
-        }
-    }
     std::set<std::string> l_stillOwned = l_generatedPaths;
     for (const std::string& l_old : l_previous)
     {
@@ -601,5 +848,16 @@ int main(int argc, char* argv[])
         std::cout << "Created " << l_stubsCreated << " stub file(s)." << std::endl;
     }
 
+    checkSources(l_generator, fs::path(l_outputDir));
+
+    for (const pyke::FetchDecl& l_fetch : l_program.fetches)
+    {
+        if (l_fetch.local && !fs::exists(fs::path(l_outputDir) / l_fetch.repo / "CMakeLists.txt"))
+        {
+            std::cerr << "warning: vendor import '" << l_fetch.name << "': " << (fs::path(l_outputDir) / l_fetch.repo / "CMakeLists.txt").string() << " does not exist (the folder is relative to the output directory)" << std::endl;
+        }
+    }
+
+    if (l_buildMode) return runBuild(l_build, fs::path(l_outputDir));
     return 0;
 }

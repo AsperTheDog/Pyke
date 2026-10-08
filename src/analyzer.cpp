@@ -21,13 +21,21 @@ const std::map<std::string, std::set<std::string>> s_builtinValues = {
 const std::set<std::string> s_configureAttrs = {
     "sources", "includes", "definitions", "flags", "link", "link_dirs",
     "copy_files", "pch", "assets", "commands", "cmake",
+    "output_name", "version", "soversion", "features",
+    "warnings", "warnings_as_errors", "sanitize", "lto",
 };
 
 const std::set<std::string> s_exportableAttrs = {
-    "includes", "definitions", "flags", "link", "link_dirs", "pch",
+    "includes", "definitions", "flags", "link", "link_dirs", "pch", "features",
 };
 
-const std::set<std::string> s_installAttrs = {"runtime", "library", "headers"};
+const std::set<std::string> s_installAttrs = {"runtime", "library", "headers", "export"};
+
+const std::set<std::string> s_warningLevels = {"none", "default", "all", "strict"};
+
+const std::set<std::string> s_sanitizers = {"address", "undefined", "thread", "leak"};
+
+const std::set<std::string> s_cStandards = {"c90", "c99", "c11", "c17", "c23"};
 
 const std::set<std::string> s_standards = {"c++11", "c++14", "c++17", "c++20", "c++23", "c++26"};
 
@@ -142,6 +150,7 @@ bool Analyzer::analyze()
     validateOptions();
     validateTargets();
     validateDependencies();
+    validateExports();
     validateMethods();
     detectCycles();
     return !hasErrors();
@@ -162,9 +171,25 @@ void Analyzer::collectNames()
 
     for (const ImportDecl& l_import : m_program.imports)
     {
-        for (const std::string& l_pkg : l_import.packages)
+        for (size_t l_i = 0; l_i < l_import.packages.size(); ++l_i)
         {
+            const std::string& l_pkg = l_import.packages[l_i];
             m_importedPackages.insert(l_pkg);
+            if (l_i < l_import.specs.size())
+            {
+                const PackageSpec& l_spec = l_import.specs[l_i];
+                if (l_spec.optional) m_optionalPackages.insert(l_pkg);
+                bool l_validVersion = true;
+                for (size_t l_c = 0; l_c < l_spec.version.size(); ++l_c)
+                {
+                    char l_ch = l_spec.version[l_c];
+                    if (!std::isdigit(static_cast<unsigned char>(l_ch)) && l_ch != '.') l_validVersion = false;
+                }
+                if (!l_validVersion || (!l_spec.version.empty() && (l_spec.version.front() == '.' || l_spec.version.back() == '.')))
+                {
+                    error(where(l_import.line) + "package '" + l_pkg + "': version '" + l_spec.version + "' must be numbers separated by dots, like 1.78 or 3.0.2");
+                }
+            }
         }
     }
 
@@ -180,9 +205,31 @@ void Analyzer::collectNames()
     {
         if (m_targetNames.count(l_fetch.name) || m_importedPackages.count(l_fetch.name))
         {
-            error(where(l_fetch.line) + "github import name '" + l_fetch.name + "' collides with another target or package");
+            error(where(l_fetch.line) + "import name '" + l_fetch.name + "' collides with another target or package");
         }
         m_targetNames.insert(l_fetch.name);
+        m_fetchNames.insert(l_fetch.name);
+        if (l_fetch.local)
+        {
+            std::string l_norm = normalizePath(l_fetch.repo);
+            if (l_norm.empty() || l_norm == ".")
+            {
+                error(where(l_fetch.line) + "vendor import '" + l_fetch.name + "': '" + l_fetch.repo + "' must be a folder inside the project (no '..' or absolute paths)");
+            }
+            for (const TargetDecl& l_t : m_program.targets)
+            {
+                if (normalizePath(l_t.path.empty() ? l_t.name : l_t.path) == l_norm)
+                {
+                    error(where(l_fetch.line) + "vendor import '" + l_fetch.name + "': folder '" + l_fetch.repo + "' is also the folder of target '" + l_t.name + "'");
+                }
+            }
+        }
+        for (const auto& l_opt : l_fetch.options)
+        {
+            bool l_ok = l_opt.second && (std::holds_alternative<BoolLiteral>(l_opt.second->value) || std::holds_alternative<StringLiteral>(l_opt.second->value) ||
+                                         std::holds_alternative<IntLiteral>(l_opt.second->value));
+            if (!l_ok) errorAt(l_fetch.line, 0, "import '" + l_fetch.name + "': option '" + l_opt.first + "' must be a bool, number or string");
+        }
     }
 }
 
@@ -225,10 +272,14 @@ void Analyzer::validateProject()
         }
     }
 
-    if (!l_proj.lang.empty() && !s_standards.count(l_proj.lang))
+    int l_cxxCount = 0, l_cCount = 0;
+    for (const std::string& l_lang : l_proj.langs)
     {
-        error(l_where + "unsupported lang '" + l_proj.lang + "' (expected one of: c++11, c++14, c++17, c++20, c++23, c++26)");
+        if (s_standards.count(l_lang)) l_cxxCount++;
+        else if (s_cStandards.count(l_lang)) l_cCount++;
+        else error(l_where + "unsupported lang '" + l_lang + "' (expected c++11 … c++26, or c90, c99, c11, c17, c23)");
     }
+    if (l_cxxCount > 1 || l_cCount > 1) error(l_where + "lang lists at most one C++ standard and one C standard, e.g. lang=[\"c11\", \"c++17\"]");
 
     if (!l_proj.outputDir.empty())
     {
@@ -286,21 +337,24 @@ void Analyzer::validateOptions()
         }
     }
 
-    for (const ImportDecl& l_import : m_program.imports)
+    auto l_checkCondition = [&](const std::string& p_condition, int p_line, const std::vector<std::string>& p_names)
     {
-        if (!l_import.condition.empty())
+        if (p_condition.empty()) return;
+        for (const std::string& l_name : p_names) m_conditionalImports[l_name] = p_condition;
+        auto l_it = m_options.find(p_condition);
+        if (l_it == m_options.end())
         {
-            auto l_it = m_options.find(l_import.condition);
-            if (l_it == m_options.end())
-            {
-                error(where(l_import.line) + "conditional import refers to unknown option '" + l_import.condition + "'");
-            }
-            else if (l_it->second->type != "bool")
-            {
-                error(where(l_import.line) + "conditional import option '" + l_import.condition + "' must be a bool");
-            }
+            std::vector<std::string> l_known;
+            for (const auto& l_o : m_options) l_known.push_back(l_o.first);
+            error(where(p_line) + "conditional import refers to unknown option '" + p_condition + "'" + didYouMean(p_condition, l_known));
         }
-    }
+        else if (l_it->second->type != "bool")
+        {
+            error(where(p_line) + "conditional import option '" + p_condition + "' must be a bool");
+        }
+    };
+    for (const ImportDecl& l_import : m_program.imports) l_checkCondition(l_import.condition, l_import.line, l_import.packages);
+    for (const FetchDecl& l_fetch : m_program.fetches) l_checkCondition(l_fetch.condition, l_fetch.line, {l_fetch.name});
 }
 
 void Analyzer::validateTargets()
@@ -331,6 +385,10 @@ void Analyzer::validateTargets()
 
         std::string l_raw = l_target.path.empty() ? l_target.name : l_target.path;
         std::string l_norm = normalizePath(l_raw);
+        if (l_raw == "." || l_raw == "./")
+        {
+            continue; // the project root: any number of targets may share it
+        }
         if (l_norm.empty())
         {
             error(l_where + "target '" + l_target.name + "': path '" + l_raw + "' must be relative and stay inside the output directory");
@@ -370,12 +428,52 @@ void Analyzer::validateDependencies()
             {
                 warning(where(l_target.line) + "target '" + l_target.name + "': duplicate dependency '" + l_dep.name + "'");
             }
-            if (l_dep.name.find('.') != std::string::npos && m_targetNames.count(l_base))
+            auto l_cond = m_conditionalImports.find(l_base);
+            if (l_cond != m_conditionalImports.end())
             {
-                error(where(l_target.line) + "target '" + l_target.name + "': '" + l_dep.name + "' uses component syntax on a target; components only apply to imported packages");
+                warning(where(l_target.line) + "target '" + l_target.name + "': '" + l_base + "' is only imported when '" + l_cond->second +
+                        "' is on, so this dependency breaks when it is off; link it inside 'if " + l_cond->second + ":' with self.link instead");
+            }
+            if (l_dep.name.find('.') != std::string::npos && m_targetNames.count(l_base) && !m_fetchNames.count(l_base))
+            {
+                error(where(l_target.line) + "target '" + l_target.name + "': '" + l_dep.name + "' uses component syntax on a target; components only apply to imported packages and github imports");
             }
             if (l_dep.visibility == "PUBLIC" || l_dep.visibility == "PRIVATE" || l_dep.visibility == "INTERFACE") continue;
             error(where(l_target.line) + "target '" + l_target.name + "': invalid dependency visibility '" + l_dep.visibility + "'");
+        }
+    }
+}
+
+// An exported target's dependencies must be findable by whoever installs it: other exported targets of the same package, or
+// (for a shared library) private implementation details that don't appear in its interface
+void Analyzer::validateExports()
+{
+    for (const TargetDecl& l_target : m_program.targets)
+    {
+        std::string l_name = exportName(l_target);
+        if (l_name.empty() || l_target.type == TargetType::EXECUTABLE) continue;
+
+        for (const Dependency& l_dep : l_target.dependencies)
+        {
+            std::string l_base = basePackage(l_dep.name);
+            bool l_hidden = l_target.type == TargetType::SHARED_LIBRARY && l_dep.visibility == "PRIVATE";
+            if (l_hidden) continue;
+
+            int l_line = l_dep.line ? l_dep.line : l_target.line;
+            if (m_fetchNames.count(l_base))
+            {
+                errorAt(l_line, l_dep.column, "target '" + l_target.name + "' is exported as '" + l_name + "' but depends on '" + l_dep.name +
+                        "', which is fetched from GitHub and can't be found again by consumers (import it as a package, or make it a PRIVATE dependency of a shared library)");
+            }
+            else if (m_localTargetNames.count(l_base))
+            {
+                auto l_it = m_targetsByName.find(l_base);
+                if (l_it != m_targetsByName.end() && exportName(*l_it->second) != l_name)
+                {
+                    errorAt(l_line, l_dep.column, "target '" + l_target.name + "' is exported as '" + l_name + "' but depends on '" + l_dep.name +
+                            "', which is not exported as '" + l_name + "' (add self.export = \"" + l_name + "\" to its install())");
+                }
+            }
         }
     }
 }
@@ -538,6 +636,59 @@ void Analyzer::validateAttributeValue(const TargetDecl& p_target, const std::str
         return;
     }
 
+    if (p_attr == "output_name" || p_attr == "version" || p_attr == "soversion")
+    {
+        if (!isStringy(p_value)) error(l_ctx + "'" + p_attr + "' expects a single string");
+        if (p_target.type == TargetType::HEADER_ONLY) error(l_ctx + "'" + p_attr + "' does not apply to header-only targets");
+        if (p_attr == "soversion" && p_target.type != TargetType::SHARED_LIBRARY) warning(l_ctx + "'soversion' only has an effect on shared libraries");
+        return;
+    }
+
+    if (p_attr == "features")
+    {
+        l_requireStringList(false);
+        return;
+    }
+
+    if (p_attr == "warnings" || p_attr == "warnings_as_errors" || p_attr == "sanitize" || p_attr == "lto")
+    {
+        if (p_target.type == TargetType::HEADER_ONLY) error(l_ctx + "'" + p_attr + "' does not apply to header-only targets");
+        if (p_attr == "warnings")
+        {
+            auto* l_str = std::get_if<StringLiteral>(&p_value.value);
+            if (!l_str) error(l_ctx + "'warnings' expects one of: none, default, all, strict");
+            else if (!s_warningLevels.count(l_str->value))
+            {
+                error(l_ctx + "'" + l_str->value + "' is not a warning level" + didYouMean(l_str->value, s_warningLevels) + " (expected: none, default, all, strict)");
+            }
+        }
+        else if (p_attr == "sanitize")
+        {
+            l_requireStringList(false);
+            bool l_address = false, l_thread = false;
+            if (l_list)
+            {
+                for (const ExprPtr& l_elem : l_list->elements)
+                {
+                    auto* l_str = std::get_if<StringLiteral>(&l_elem->value);
+                    if (!l_str) continue;
+                    if (!s_sanitizers.count(l_str->value))
+                    {
+                        error(l_ctx + "'" + l_str->value + "' is not a sanitizer" + didYouMean(l_str->value, s_sanitizers) + " (expected: address, undefined, thread, leak)");
+                    }
+                    l_address |= l_str->value == "address";
+                    l_thread |= l_str->value == "thread";
+                }
+            }
+            if (l_address && l_thread) error(l_ctx + "the 'address' and 'thread' sanitizers cannot be combined");
+        }
+        else if (!std::holds_alternative<BoolLiteral>(p_value.value))
+        {
+            error(l_ctx + "'" + p_attr + "' expects True or False");
+        }
+        return;
+    }
+
     if (p_attr == "sources" || p_attr == "includes" || p_attr == "flags" || p_attr == "link_dirs" || p_attr == "copy_files")
     {
         l_requireStringList(false);
@@ -551,8 +702,10 @@ void Analyzer::validateAttributeValue(const TargetDecl& p_target, const std::str
             {
                 if (auto* l_s = std::get_if<StringLiteral>(&l_elem->value))
                 {
+                    std::string l_value = l_s->value.compare(0, 2, "//") == 0 ? l_s->value.substr(2) : l_s->value; // "//" anchors at the project root
                     if (l_s->value.empty()) error(l_ctx + "empty source path");
-                    else if (normalizePath(l_s->value).empty() && l_s->value.find("..") == std::string::npos) error(l_ctx + "source '" + l_s->value + "' must be a relative path");
+                    else if (l_value.empty() || l_value[0] == '/') error(l_ctx + "source '" + l_s->value + "' must be a relative path");
+                    else if (normalizePath(l_value).empty() && l_value.find("..") == std::string::npos) error(l_ctx + "source '" + l_s->value + "' must be a relative path");
                 }
             }
         }
@@ -643,6 +796,12 @@ void Analyzer::validateAttributeValue(const TargetDecl& p_target, const std::str
         if (!isStringy(p_value)) error(l_ctx + "'" + p_attr + "' expects a destination string");
         if (p_target.type == TargetType::HEADER_ONLY) error(l_ctx + "header-only targets have no '" + p_attr + "' artifact to install");
     }
+    else if (p_attr == "export")
+    {
+        auto* l_str = std::get_if<StringLiteral>(&p_value.value);
+        if (!l_str || !isValidIdentifier(l_str->value)) error(l_ctx + "'export' expects a package name string like \"MyLib\" (letters, digits and underscores)");
+        if (p_target.type == TargetType::EXECUTABLE) error(l_ctx + "only libraries can be exported");
+    }
     else if (p_attr == "headers")
     {
         auto* l_tuple = std::get_if<TupleLiteral>(&p_value.value);
@@ -721,6 +880,7 @@ void Analyzer::validateCondition(const TargetDecl& p_target, const Expression& p
     if (auto* l_id = std::get_if<Identifier>(&p_cond.value))
     {
         auto l_opt = m_options.find(l_id->name);
+        if (l_opt == m_options.end() && m_optionalPackages.count(l_id->name)) return;
         if (l_opt == m_options.end())
         {
             if (s_builtinVars.count(l_id->name))
@@ -729,7 +889,7 @@ void Analyzer::validateCondition(const TargetDecl& p_target, const Expression& p
             }
             else
             {
-                std::vector<std::string> l_known;
+                std::vector<std::string> l_known(m_optionalPackages.begin(), m_optionalPackages.end());
                 for (const auto& l_o : m_options) l_known.push_back(l_o.first);
                 l_at(p_cond, "unknown variable '" + l_id->name + "' in condition" + didYouMean(l_id->name, l_known));
             }

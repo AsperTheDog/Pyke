@@ -39,6 +39,7 @@ private:
     void synchronize();
 
     ImportDecl parseImport();
+    PackageSpec parsePackageSpec();
     EnvImport parseEnvImport();
     FetchDecl parseFetch();
     ProjectDecl parseProject();

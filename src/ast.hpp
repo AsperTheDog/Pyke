@@ -132,9 +132,18 @@ struct Statement
     int column = 0;
 };
 
+// Per-package settings from `Boost(1.78)`, `Vulkan(optional=True)`, `Qt6(6.5, config=True)`
+struct PackageSpec
+{
+    std::string version;
+    bool optional = false;
+    bool config = false;
+};
+
 struct ImportDecl
 {
     std::vector<std::string> packages;
+    std::vector<PackageSpec> specs; // parallel to packages
     std::string condition;
     int line = 0;
 };
@@ -147,10 +156,12 @@ struct EnvImport
 
 struct FetchDecl
 {
+    bool local = false; // `from vendor import "folder" as name`: repo is a folder in the project with its own CMakeLists.txt
     std::string repo;
     std::string name;
     std::string tag;
     std::string condition;
+    std::vector<std::pair<std::string, ExprPtr>> options; // cache variables set before the fetched project is added
     int line = 0;
 };
 
@@ -165,7 +176,7 @@ struct ProjectDecl
 {
     std::string name;
     std::string version;
-    std::string lang;
+    std::vector<std::string> langs; // "c++20", "c11", or several for a mixed project
     std::string outputDir;
     bool presets = false;
     int line = 0;
@@ -227,6 +238,32 @@ struct Program
     std::vector<TargetDecl> targets;
     std::vector<RawCmake> rawCmake;
 };
+
+// The value of a top-level `self.<attr> = ...` in a target's install() method, or null
+inline const Expression* installValue(const TargetDecl& p_target, const std::string& p_attr)
+{
+    for (const Method& l_method : p_target.methods)
+    {
+        if (l_method.name != "install") continue;
+        for (const StmtPtr& l_stmt : l_method.body)
+        {
+            auto* l_assign = std::get_if<AssignStatement>(&l_stmt->value);
+            if (!l_assign) continue;
+            auto* l_dot = std::get_if<DotAccess>(&l_assign->target->value);
+            auto* l_self = l_dot ? std::get_if<Identifier>(&l_dot->object->value) : nullptr;
+            if (l_self && l_self->name == "self" && l_dot->member == p_attr) return l_assign->value.get();
+        }
+    }
+    return nullptr;
+}
+
+// The package name from `self.export = "Name"` in install(), or empty
+inline std::string exportName(const TargetDecl& p_target)
+{
+    const Expression* l_value = installValue(p_target, "export");
+    auto* l_str = l_value ? std::get_if<StringLiteral>(&l_value->value) : nullptr;
+    return l_str ? l_str->value : "";
+}
 
 inline ExprPtr makeExpr(int p_line, int p_col, auto&& p_val)
 {

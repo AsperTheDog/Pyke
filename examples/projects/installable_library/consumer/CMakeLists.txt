@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.21)
+project(Consumer CXX)
+enable_testing()
+find_package(MyLib 1.2 REQUIRED)
+add_executable(c main.cpp)
+target_link_libraries(c PRIVATE MyLib::mylib)
+add_test(NAME consumer COMMAND c)

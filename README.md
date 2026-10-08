@@ -37,15 +37,18 @@ cmake --build . --config Release
 ```bash
 pyke my_project.pyke output_dir/    # generate CMake files (only rewrites what changed)
 pyke --clean my_project.pyke out/   # also delete files from removed targets
+pyke --force my_project.pyke out/   # overwrite files pyke did not generate (refused by default)
 pyke --init my_project/             # scaffold .pyke from existing directory
 pyke --validate my_project.pyke     # check without generating
-pyke --fmt my_project.pyke          # format
+pyke --fmt my_project.pyke          # format (add --check to fail instead, for CI)
+pyke build                          # generate + configure + build in ./build (--debug, --target X, -j N)
+pyke test                           # same, then run ctest
 pyke --upgrade my_project.pyke      # list FetchContent deps and their tags
 ```
 
 ## Features
 
-- **Imports:** `from packages import`, `from github import` (FetchContent), `from env import`, conditional imports
+- **Imports:** `from packages import Boost(1.78), Vulkan(optional=True)`, `from github import` (FetchContent), `from vendor import` (folders with their own CMakeLists.txt), `from env import`, conditional imports
 - **Target types:** `@Executable`, `@SharedLibrary`, `@StaticLibrary`, `@HeaderOnly`
 - **Decorator options:** `path`, `source_groups`, `copy_dlls`, `test`, `unity_build`
 - **Conditionals:** `if`/`elif`/`else` on `platform`, `compiler`, `build_type`, and user options, combined with `and`/`or`/`not`
@@ -53,6 +56,8 @@ pyke --upgrade my_project.pyke      # list FetchContent deps and their tags
 - **Escape hatch:** `cmake("...")` and `self.cmake += [...]` for anything Pyke has no syntax for
 - **Good errors:** line/column, source snippet and "did you mean" suggestions
 - **Attributes:** `sources`, `includes`, `definitions`, `flags`, `link`, `link_dirs`, `copy_files`, `pch`, `assets`, `commands`, and `exports.*` variants
+- **Quality settings:** `warnings = "strict"`, `warnings_as_errors`, `sanitize = ["address"]`, `lto = True`, translated per compiler
+- **Root-anchored paths:** `"//src/*.cpp"` instead of `"../../src/*.cpp"`
 - **Project settings:** `output_dir`, `presets=True` for CMakePresets.json generation
 - **Stub creation:** missing source files are created as empty stubs automatically
 
@@ -65,6 +70,10 @@ cp -r vscode-extension ~/.vscode/extensions/pyke.pyke-language-0.1.0
 ```
 
 ## Examples
+
+Complete projects (sources included) live in [`examples/projects/`](examples/projects). `tests/run_examples.sh <pyke binary>` generates, builds and tests each one with a real CMake (`PYKE_OFFLINE=1` skips the ones that fetch from GitHub): a conventional `include/src/app/tests` library, a package-using app, a shared plugin, a C project, an installable library with a `find_package` consumer, and an app with GitHub dependencies.
+
+Single-file examples:
 
 | File | Description |
 |---|---|

@@ -11,6 +11,7 @@ add_executable(pyke
     src/parser.cpp
     src/analyzer.cpp
     src/generator.cpp
+    src/format.cpp
 )
 
 target_include_directories(pyke PRIVATE src)
@@ -52,7 +53,21 @@ add_executable(test_generator
 
 target_include_directories(test_generator PRIVATE src)
 
+add_executable(test_format
+    tests/test_format.cpp
+    src/lexer.cpp
+    src/format.cpp
+)
+
+target_include_directories(test_format PRIVATE src)
+
+add_test(NAME test_format COMMAND test_format)
 add_test(NAME test_lexer COMMAND test_lexer)
 add_test(NAME test_parser COMMAND test_parser)
 add_test(NAME test_analyzer COMMAND test_analyzer)
 add_test(NAME test_generator COMMAND test_generator)
+
+# Command-line integration tests (need bash)
+if(NOT WIN32)
+    add_test(NAME cli COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli_tests.sh $<TARGET_FILE:pyke>)
+endif()

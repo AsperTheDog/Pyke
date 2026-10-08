@@ -59,7 +59,7 @@
         },
         "builtins": {
             "name": "variable.language.builtin.pyke",
-            "match": "\\b(platform|compiler|build_type|packages)\\b"
+            "match": "\\b(platform|compiler|build_type|packages|vendor|github|env)\\b"
         },
         "option-types": {
             "name": "support.type.primitive.pyke",

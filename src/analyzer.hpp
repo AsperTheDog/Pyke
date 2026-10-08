@@ -35,6 +35,7 @@ private:
     void validateOptions();
     void validateTargets();
     void validateDependencies();
+    void validateExports();
     void validateMethods();
     void validateBody(const TargetDecl& p_target, const Method& p_method, const std::vector<StmtPtr>& p_body, bool& p_sawSources);
     void validateStatement(const TargetDecl& p_target, const Method& p_method, const Statement& p_stmt, bool& p_sawSources);
@@ -60,6 +61,9 @@ private:
     std::set<std::string> m_targetNames;
     std::set<std::string> m_localTargetNames;
     std::set<std::string> m_importedPackages;
+    std::set<std::string> m_optionalPackages;
+    std::map<std::string, std::string> m_conditionalImports; // imported name -> option that guards it // imported with optional=True; usable as `if Name:`
+    std::set<std::string> m_fetchNames;
     std::set<std::string> m_envVars;
     std::map<std::string, const OptionDecl*> m_options;
     std::map<std::string, const TargetDecl*> m_targetsByName;

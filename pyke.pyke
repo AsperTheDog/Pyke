@@ -9,7 +9,8 @@ target pyke_core():
             "../src/lexer.cpp",
             "../src/parser.cpp",
             "../src/analyzer.cpp",
-            "../src/generator.cpp"
+            "../src/generator.cpp",
+            "../src/format.cpp"
         ]
         self.exports.includes = ["../src"]
 

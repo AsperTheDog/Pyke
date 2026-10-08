@@ -1,0 +1,26 @@
+# FetchContent dependencies (fmt, GoogleTest) with options, plus find_package and configure_file. Needs network.
+
+from packages import Threads
+from github import "fmtlib/fmt" as fmt, tag="10.2.1", options={"FMT_TEST": False, "FMT_DOC": False}
+from github import "google/googletest" as GTest, tag="v1.14.0", options={"INSTALL_GTEST": False}
+
+project("Full", version="2.0.1", lang="c++20")
+
+@HeaderOnly("libs/hdr")
+target hdr():
+    def configure(self):
+        self.exports.includes = ["include"]
+
+@Executable("src")
+target app(PRIVATE hdr, PRIVATE fmt, PRIVATE Threads):
+    def configure(self):
+        self.sources = ["main.cpp"]
+        self.includes = ["${CMAKE_CURRENT_BINARY_DIR}"]
+        self.output_name = "full-app"
+        self.features = ["cxx_std_20"]
+        self.cmake += ["configure_file(version.h.in version.h @ONLY)"]
+
+@Executable("tests", test=True)
+target full_tests(PRIVATE hdr, PRIVATE GTest.gtest_main):
+    def configure(self):
+        self.sources = ["t.cpp"]

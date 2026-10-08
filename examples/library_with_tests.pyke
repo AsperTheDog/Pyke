@@ -1,6 +1,6 @@
 # A library project with tests and install rules
 
-from github import "google/googletest" as GTest, tag="v1.15.2"
+from github import "google/googletest" as GTest, tag="v1.15.2", options={"INSTALL_GTEST": False}
 
 project("MyLib", version="0.1.0", lang="c++20")
 
@@ -22,6 +22,6 @@ target mylib():
         self.headers = ("include/", "include/mylib")
 
 @Executable("tests", test=True, copy_dlls=False, source_groups=False)
-target mylib_tests(PRIVATE mylib, PRIVATE GTest):
+target mylib_tests(PRIVATE mylib, PRIVATE GTest.gtest_main):
     def configure(self):
         self.sources = ["src/*.cpp"]

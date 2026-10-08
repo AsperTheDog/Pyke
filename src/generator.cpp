@@ -1,9 +1,13 @@
 #include "generator.hpp"
 #include <algorithm>
+#include <filesystem>
 #include <sstream>
 
 namespace pyke
 {
+
+static std::string escapeCmake(const std::string& p_value);
+
 
 Generator::Generator(const Program& p_program)
     : m_program(p_program)
@@ -14,14 +18,26 @@ Generator::Generator(const Program& p_program)
     }
     for (const ImportDecl& l_import : m_program.imports)
     {
-        for (const std::string& l_pkg : l_import.packages)
+        for (size_t l_i = 0; l_i < l_import.packages.size(); ++l_i)
         {
-            m_importedPackages.insert(l_pkg);
+            m_importedPackages.insert(l_import.packages[l_i]);
+            if (l_i < l_import.specs.size() && l_import.specs[l_i].optional) m_optionalPackages.insert(l_import.packages[l_i]);
         }
     }
     for (const FetchDecl& l_fetch : m_program.fetches)
     {
         m_targetNames.insert(l_fetch.name);
+        m_fetchedNames.insert(l_fetch.name);
+    }
+    if (m_program.project)
+    {
+        bool l_cxx = false;
+        for (const std::string& l_lang : m_program.project->langs)
+        {
+            if (l_lang.substr(0, 3) == "c++") l_cxx = true;
+            else m_hasC = true;
+        }
+        m_compilerIdVar = (m_hasC && !l_cxx) ? "CMAKE_C_COMPILER_ID" : "CMAKE_CXX_COMPILER_ID";
     }
     collectPackageComponents();
 }
@@ -35,6 +51,7 @@ std::vector<GeneratedFile> Generator::generate()
     for (const TargetDecl& l_target : m_program.targets)
     {
         std::string l_dir = targetDir(l_target);
+        if (l_dir == ".") continue; // lives in the root CMakeLists.txt
         l_files.push_back({l_dir + "/CMakeLists.txt", generateTarget(l_target)});
     }
 
@@ -59,18 +76,27 @@ std::string Generator::generateRoot()
         {
             l_out << " VERSION " << m_program.project->version;
         }
-        l_out << " LANGUAGES CXX)\n";
-
-        if (!m_program.project->lang.empty())
+        bool l_hasCxx = !m_hasC; // C++ is the default language when none is given
+        for (const std::string& l_lang : m_program.project->langs)
         {
-            std::string l_stdVer = m_program.project->lang;
-            if (l_stdVer.substr(0, 3) == "c++")
-            {
-                l_stdVer = l_stdVer.substr(3);
-            }
-            l_out << "\nset(CMAKE_CXX_STANDARD " << l_stdVer << ")\n";
-            l_out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
+            if (l_lang.substr(0, 3) == "c++") l_hasCxx = true;
         }
+        l_out << " LANGUAGES" << (m_hasC ? " C" : "") << (l_hasCxx ? " CXX" : "") << ")\n";
+
+        for (const std::string& l_lang : m_program.project->langs)
+        {
+            bool l_isCxx = l_lang.substr(0, 3) == "c++";
+            std::string l_stdVer = l_isCxx ? l_lang.substr(3) : l_lang.substr(1);
+            std::string l_var = l_isCxx ? "CMAKE_CXX_STANDARD" : "CMAKE_C_STANDARD";
+            l_out << "\nset(" << l_var << " " << l_stdVer << ")\n";
+            l_out << "set(" << l_var << "_REQUIRED ON)\n";
+        }
+
+        // Single-config generators otherwise build with no optimisation flags at all
+        l_out << "\nif(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)\n";
+        l_out << "    set(CMAKE_BUILD_TYPE Release CACHE STRING \"Build type\" FORCE)\n";
+        l_out << "endif()\n";
+        l_out << "set(CMAKE_EXPORT_COMPILE_COMMANDS ON)\n";
 
         if (!m_program.project->outputDir.empty())
         {
@@ -118,10 +144,15 @@ std::string Generator::generateRoot()
             {
                 l_out << "if(" << l_import.condition << ")\n    ";
             }
-            for (const std::string& l_pkg : l_import.packages)
+            for (size_t l_pi = 0; l_pi < l_import.packages.size(); ++l_pi)
             {
-                if (l_conditional && &l_pkg != &l_import.packages[0]) l_out << "    ";
-                l_out << "find_package(" << l_pkg << " REQUIRED";
+                const std::string& l_pkg = l_import.packages[l_pi];
+                PackageSpec l_spec = l_pi < l_import.specs.size() ? l_import.specs[l_pi] : PackageSpec{};
+                if (l_conditional && l_pi > 0) l_out << "    ";
+                l_out << "find_package(" << l_pkg;
+                if (!l_spec.version.empty()) l_out << " " << l_spec.version;
+                if (!l_spec.optional) l_out << " REQUIRED";
+                if (l_spec.config) l_out << " CONFIG";
                 std::map<std::string, std::set<std::string>>::const_iterator l_it = m_packageComponents.find(l_pkg);
                 if (l_it != m_packageComponents.end() && !l_it->second.empty())
                 {
@@ -145,18 +176,38 @@ std::string Generator::generateRoot()
         l_out << "\ninclude(FetchContent)\n";
         for (const FetchDecl& l_fetch : m_program.fetches)
         {
-            l_out << "FetchContent_Declare(" << l_fetch.name << "\n";
-            l_out << "    GIT_REPOSITORY https://github.com/" << l_fetch.repo << ".git\n";
+            std::string l_ind = l_fetch.condition.empty() ? "" : "    ";
+            if (!l_fetch.condition.empty()) l_out << "if(" << l_fetch.condition << ")\n";
+            for (const auto& l_opt : l_fetch.options)
+            {
+                std::string l_value, l_type = "STRING";
+                if (auto* l_b = std::get_if<BoolLiteral>(&l_opt.second->value)) { l_value = l_b->value ? "ON" : "OFF"; l_type = "BOOL"; }
+                else if (auto* l_s = std::get_if<StringLiteral>(&l_opt.second->value)) l_value = escapeCmake(l_s->value);
+                else if (auto* l_i = std::get_if<IntLiteral>(&l_opt.second->value)) l_value = std::to_string(l_i->value);
+                l_out << l_ind << "set(" << l_opt.first << " \"" << l_value << "\" CACHE " << l_type << " \"\" FORCE)\n";
+            }
+            if (l_fetch.local)
+            {
+                if (!l_fetch.condition.empty()) l_out << "endif()\n"; // vendored folders are added in the second pass, with the other imports
+                continue;
+            }
+            l_out << l_ind << "FetchContent_Declare(" << l_fetch.name << "\n";
+            l_out << l_ind << "    GIT_REPOSITORY https://github.com/" << l_fetch.repo << ".git\n";
             if (!l_fetch.tag.empty())
             {
-                l_out << "    GIT_TAG " << l_fetch.tag << "\n";
+                l_out << l_ind << "    GIT_TAG " << l_fetch.tag << "\n";
+                bool l_isCommit = l_fetch.tag.size() >= 7 && l_fetch.tag.find_first_not_of("0123456789abcdef") == std::string::npos;
+                if (!l_isCommit) l_out << l_ind << "    GIT_SHALLOW TRUE\n"; // a tag or branch can be cloned shallowly; a commit hash can't
             }
-            l_out << ")\n";
+            l_out << l_ind << ")\n";
+            if (!l_fetch.condition.empty()) l_out << "endif()\n";
         }
         l_out << "\n";
         for (const FetchDecl& l_fetch : m_program.fetches)
         {
-            l_out << "FetchContent_MakeAvailable(" << l_fetch.name << ")\n";
+            std::string l_add = l_fetch.local ? "add_subdirectory(" + l_fetch.repo + ")" : "FetchContent_MakeAvailable(" + l_fetch.name + ")";
+            if (l_fetch.condition.empty()) l_out << l_add << "\n";
+            else l_out << "if(" << l_fetch.condition << ")\n    " << l_add << "\nendif()\n";
         }
     }
 
@@ -181,11 +232,75 @@ std::string Generator::generateRoot()
         l_out << "\n";
         for (const TargetDecl& l_target : m_program.targets)
         {
-            l_out << "add_subdirectory(" << targetDir(l_target) << ")\n";
+            if (targetDir(l_target) != ".") l_out << "add_subdirectory(" << targetDir(l_target) << ")\n";
         }
     }
 
+    emitPackageExports(l_out);
+
+    // Targets declared with path "." sit beside the project() call, after every subdirectory is added
+    for (const TargetDecl& l_target : m_program.targets)
+    {
+        if (targetDir(l_target) != ".") continue;
+        l_out << "\n# " << l_target.name << "\n" << generateTarget(l_target);
+    }
+
     return l_out.str();
+}
+
+// One find_package()-able package per distinct `self.export` name
+void Generator::emitPackageExports(std::ostringstream& p_out)
+{
+    std::map<std::string, std::set<std::string>> l_packages; // export name -> imported packages its targets need
+    for (const TargetDecl& l_target : m_program.targets)
+    {
+        std::string l_name = exportName(l_target);
+        if (l_name.empty() || l_target.type == TargetType::EXECUTABLE) continue;
+        std::set<std::string>& l_deps = l_packages[l_name];
+        for (const Dependency& l_dep : l_target.dependencies)
+        {
+            if (l_target.type == TargetType::SHARED_LIBRARY && l_dep.visibility == "PRIVATE") continue;
+            size_t l_dot = l_dep.name.find('.');
+            std::string l_base = l_dot == std::string::npos ? l_dep.name : l_dep.name.substr(0, l_dot);
+            if (m_importedPackages.count(l_base)) l_deps.insert(l_base);
+        }
+    }
+    if (l_packages.empty()) return;
+
+    p_out << "\ninclude(CMakePackageConfigHelpers)\n";
+    for (const auto& l_pkg : l_packages)
+    {
+        const std::string& l_name = l_pkg.first;
+        std::string l_dest = "lib/cmake/" + l_name;
+        p_out << "\n# find_package(" << l_name << ") support\n";
+        p_out << "install(EXPORT " << l_name << "Targets NAMESPACE " << l_name << ":: DESTINATION " << l_dest << ")\n";
+
+        std::string l_config = "include(CMakeFindDependencyMacro)\\n";
+        for (const std::string& l_dep : l_pkg.second)
+        {
+            l_config += "find_dependency(" + l_dep;
+            auto l_comps = m_packageComponents.find(l_dep);
+            if (l_comps != m_packageComponents.end() && !l_comps->second.empty())
+            {
+                l_config += " COMPONENTS";
+                for (const std::string& l_c : l_comps->second) l_config += " " + l_c;
+            }
+            l_config += ")\\n";
+        }
+        l_config += "include(\\\"\\${CMAKE_CURRENT_LIST_DIR}/" + l_name + "Targets.cmake\\\")\\n";
+        p_out << "file(WRITE \"${CMAKE_CURRENT_BINARY_DIR}/" << l_name << "Config.cmake\" \"" << l_config << "\")\n";
+        p_out << "install(FILES \"${CMAKE_CURRENT_BINARY_DIR}/" << l_name << "Config.cmake\"";
+        if (m_program.project && !m_program.project->version.empty())
+        {
+            p_out << "\n    \"${CMAKE_CURRENT_BINARY_DIR}/" << l_name << "ConfigVersion.cmake\"";
+        }
+        p_out << " DESTINATION " << l_dest << ")\n";
+        if (m_program.project && !m_program.project->version.empty())
+        {
+            p_out << "write_basic_package_version_file(\"${CMAKE_CURRENT_BINARY_DIR}/" << l_name << "ConfigVersion.cmake\"\n"
+                  << "    VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)\n";
+        }
+    }
 }
 
 std::string Generator::generatePresets()
@@ -239,6 +354,7 @@ std::string Generator::generateTarget(const TargetDecl& p_target)
 {
     m_globCounter = 0;
     m_currentTargetDir = targetDir(p_target);
+    m_currentExport = p_target.type == TargetType::EXECUTABLE ? "" : exportName(p_target);
     std::string l_result;
 
     std::string l_typeCmd = cmakeTargetType(p_target);
@@ -286,6 +402,23 @@ std::string Generator::generateTarget(const TargetDecl& p_target)
         l_result += "endif()\n";
     }
 
+    if (!m_currentExport.empty())
+    {
+        auto l_dest = [&](const char* p_attr, const char* p_default)
+        {
+            const Expression* l_value = installValue(p_target, p_attr);
+            return l_value ? exprToCmake(*l_value) : std::string(p_default);
+        };
+        l_result += "\ninstall(TARGETS " + p_target.name + " EXPORT " + m_currentExport + "Targets\n";
+        if (p_target.type != TargetType::HEADER_ONLY)
+        {
+            l_result += "    RUNTIME DESTINATION " + l_dest("runtime", "bin") + "\n";
+            l_result += "    LIBRARY DESTINATION " + l_dest("library", "lib") + "\n";
+            l_result += "    ARCHIVE DESTINATION " + l_dest("library", "lib") + "\n";
+        }
+        l_result += "    INCLUDES DESTINATION include\n)\n";
+    }
+
     if (p_target.test && p_target.type == TargetType::EXECUTABLE)
     {
         l_result += "\nadd_test(NAME " + p_target.name + " COMMAND " + p_target.name + ")\n";
@@ -293,10 +426,12 @@ std::string Generator::generateTarget(const TargetDecl& p_target)
 
     if (p_target.copyDlls && p_target.type == TargetType::EXECUTABLE)
     {
-        // TARGET_RUNTIME_DLLS is empty off Windows, which would make copy_if_different fail the build
+        // TARGET_RUNTIME_DLLS is empty off Windows, and also for an executable with no DLL dependencies; copy_if_different
+        // with no files is a usage error, so the command degrades to `cmake -E true` in that case
+        const std::string l_dlls = "$<TARGET_RUNTIME_DLLS:" + p_target.name + ">";
         l_result += "\nif(WIN32)\n";
         l_result += "    add_custom_command(TARGET " + p_target.name + " POST_BUILD\n";
-        l_result += "        COMMAND ${CMAKE_COMMAND} -E copy_if_different\n";
+        l_result += "        COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:" + l_dlls + ">,copy_if_different,true>\n";
         l_result += "            $<TARGET_RUNTIME_DLLS:" + p_target.name + ">\n";
         l_result += "            $<TARGET_FILE_DIR:" + p_target.name + ">\n";
         l_result += "        COMMAND_EXPAND_LISTS\n";
@@ -474,9 +609,23 @@ void Generator::emitListCommand(const std::string& p_cmakeCmd, const TargetDecl&
     p_out += l_ind + p_cmakeCmd + "(" + p_target.name + " " + p_visibility + "\n";
     if (auto* l_list = std::get_if<ListLiteral>(&p_value.value))
     {
+        // An exported target's include paths must differ between the build tree and the installed tree
+        bool l_wrap = p_cmakeCmd == "target_include_directories" && p_visibility != "PRIVATE" && !m_currentExport.empty();
         for (const ExprPtr& l_elem : l_list->elements)
         {
-            p_out += l_ind + "    " + exprToCmake(*l_elem) + "\n";
+            auto* l_str = std::get_if<StringLiteral>(&l_elem->value);
+            if (l_wrap && l_str && l_str->value.size() > 2 && l_str->value.compare(0, 2, "//") == 0 && l_str->value[2] != '/')
+            {
+                p_out += l_ind + "    \"$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/" + l_str->value.substr(2) + ">\"\n";
+            }
+            else if (l_wrap && l_str && !l_str->value.empty() && l_str->value[0] != '/' && l_str->value[0] != '$')
+            {
+                p_out += l_ind + "    \"$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/" + l_str->value + ">\"\n";
+            }
+            else
+            {
+                p_out += l_ind + "    " + exprToCmake(*l_elem) + "\n";
+            }
         }
     }
     p_out += l_ind + ")\n";
@@ -487,15 +636,87 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
     emitAssignment(*p_assign.target, *p_assign.value, p_target, p_out, p_indentLevel);
 }
 
+// warnings / warnings_as_errors / sanitize / lto: one setting, translated per compiler family
+void Generator::emitQualityAttribute(const std::string& p_attr, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel)
+{
+    std::string l_ind = indent(p_indentLevel);
+    const std::string& l_name = p_target.name;
+    std::string l_idKind = m_compilerIdVar == "CMAKE_C_COMPILER_ID" ? "C_COMPILER_ID" : "CXX_COMPILER_ID";
+    std::string l_msvc = "$<" + l_idKind + ":MSVC>";
+    std::string l_gnuLike = "$<" + l_idKind + ":GNU,Clang,AppleClang>";
+
+    auto l_options = [&](const std::string& p_command, const std::string& p_msvcFlags, const std::string& p_gnuFlags)
+    {
+        if (!p_msvcFlags.empty()) p_out += l_ind + p_command + "(" + l_name + " PRIVATE \"$<$<BOOL:" + l_msvc + ">:" + p_msvcFlags + ">\")\n";
+        if (!p_gnuFlags.empty()) p_out += l_ind + p_command + "(" + l_name + " PRIVATE \"$<$<BOOL:" + l_gnuLike + ">:" + p_gnuFlags + ">\")\n";
+    };
+
+    if (p_attr == "warnings")
+    {
+        std::string l_level = std::get<StringLiteral>(p_rhs.value).value;
+        if (l_level == "none") l_options("target_compile_options", "/W0", "-w");
+        else if (l_level == "all") l_options("target_compile_options", "/W3", "-Wall");
+        else if (l_level == "strict") l_options("target_compile_options", "/W4", "-Wall;-Wextra;-Wpedantic");
+        return;
+    }
+
+    if (p_attr == "warnings_as_errors")
+    {
+        if (std::get<BoolLiteral>(p_rhs.value).value) l_options("target_compile_options", "/WX", "-Werror");
+        return;
+    }
+
+    if (p_attr == "sanitize")
+    {
+        std::string l_gnuList, l_msvcFlag;
+        if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
+        {
+            for (const ExprPtr& l_elem : l_list->elements)
+            {
+                auto* l_str = std::get_if<StringLiteral>(&l_elem->value);
+                if (!l_str) continue;
+                l_gnuList += (l_gnuList.empty() ? "" : ",") + l_str->value;
+                if (l_str->value == "address") l_msvcFlag = "/fsanitize=address";
+            }
+        }
+        if (l_gnuList.empty()) return;
+        l_options("target_compile_options", l_msvcFlag, "-fsanitize=" + l_gnuList + ";-fno-omit-frame-pointer");
+        l_options("target_link_options", "", "-fsanitize=" + l_gnuList);
+        return;
+    }
+
+    if (p_attr == "lto" && std::get<BoolLiteral>(p_rhs.value).value)
+    {
+        p_out += l_ind + "include(CheckIPOSupported)\n";
+        p_out += l_ind + "check_ipo_supported(RESULT " + l_name + "_ipo_supported OUTPUT " + l_name + "_ipo_message)\n";
+        p_out += l_ind + "if(" + l_name + "_ipo_supported)\n";
+        p_out += l_ind + "    set_target_properties(" + l_name + " PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)\n";
+        p_out += l_ind + "else()\n";
+        p_out += l_ind + "    message(WARNING \"lto is not supported for " + l_name + ": ${" + l_name + "_ipo_message}\")\n";
+        p_out += l_ind + "endif()\n";
+    }
+}
+
 void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel)
 {
     std::string l_visibility;
     std::string l_attr = resolveAttribute(p_lhs, p_target, l_visibility);
+    static const std::set<std::string> s_pathAttrs = {"sources", "includes", "link_dirs", "copy_files", "pch", "assets", "headers"};
+    struct AnchorScope
+    {
+        bool& flag;
+        bool saved;
+        AnchorScope(bool& p_flag, bool p_value) : flag(p_flag), saved(p_flag) { flag = p_value; }
+        ~AnchorScope() { flag = saved; }
+    } l_anchorScope(m_anchorPaths, s_pathAttrs.count(l_attr) > 0);
     std::string l_valueStr = exprToCmake(p_rhs);
     std::string l_ind = indent(p_indentLevel);
 
+    if (l_attr == "export") return; // handled once per target in emitExportInstall
+
     if (l_attr == "runtime" || l_attr == "library" || l_attr == "headers")
     {
+        if (!m_currentExport.empty() && l_attr != "headers") return; // merged into the single install(TARGETS ... EXPORT) call
         if (l_attr == "headers")
         {
             if (auto* l_tuple = std::get_if<TupleLiteral>(&p_rhs.value))
@@ -543,10 +764,24 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
         if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
         {
             bool l_hasGlob = false;
+            SourceSet* l_set = nullptr;
+            for (SourceSet& l_existing : m_sourceSets)
+            {
+                if (l_existing.target == p_target.name) l_set = &l_existing;
+            }
+            if (!l_set)
+            {
+                m_sourceSets.push_back({p_target.name, m_currentTargetDir, {}});
+                l_set = &m_sourceSets.back();
+            }
             for (const ExprPtr& l_elem : l_list->elements)
             {
                 if (auto* l_s = std::get_if<StringLiteral>(&l_elem->value))
                 {
+                    const std::string& l_v = l_s->value;
+                    bool l_anchored = l_v.size() > 2 && l_v.compare(0, 2, "//") == 0;
+                    std::filesystem::path l_full = l_anchored ? std::filesystem::path(l_v.substr(2)) : std::filesystem::path(m_currentTargetDir) / l_v;
+                    l_set->entries.push_back(l_full.lexically_normal().generic_string());
                     if (l_s->value.find('*') != std::string::npos)
                     {
                         l_hasGlob = true;
@@ -574,7 +809,8 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
                     p_out += l_ind + "    " + exprToCmake(*l_elem) + "\n";
                     if (auto* l_s = std::get_if<StringLiteral>(&l_elem->value))
                     {
-                        m_sourceRefs.push_back({m_currentTargetDir, l_s->value});
+                        if (l_s->value.size() > 2 && l_s->value.compare(0, 2, "//") == 0) m_sourceRefs.push_back({".", l_s->value.substr(2)});
+                        else m_sourceRefs.push_back({m_currentTargetDir, l_s->value});
                     }
                 }
                 p_out += l_ind + ")\n";
@@ -582,6 +818,19 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
         }
         return;
     }
+
+    if (l_attr == "output_name" || l_attr == "version" || l_attr == "soversion")
+    {
+        std::string l_prop = l_attr == "output_name" ? "OUTPUT_NAME" : (l_attr == "version" ? "VERSION" : "SOVERSION");
+        p_out += l_ind + "set_target_properties(" + p_target.name + " PROPERTIES " + l_prop + " " + l_valueStr + ")\n";
+        return;
+    }
+    if (l_attr == "warnings" || l_attr == "warnings_as_errors" || l_attr == "sanitize" || l_attr == "lto")
+    {
+        emitQualityAttribute(l_attr, p_rhs, p_target, p_out, p_indentLevel);
+        return;
+    }
+    if (l_attr == "features") { emitListCommand("target_compile_features", p_target, l_visibility, p_rhs, p_out, p_indentLevel); return; }
 
     if (l_attr == "includes") { emitListCommand("target_include_directories", p_target, l_visibility, p_rhs, p_out, p_indentLevel); return; }
     if (l_attr == "flags") { emitListCommand("target_compile_options", p_target, l_visibility, p_rhs, p_out, p_indentLevel); return; }
@@ -771,6 +1020,11 @@ std::string Generator::exprToCmake(const Expression& p_expr)
 {
     if (auto* l_str = std::get_if<StringLiteral>(&p_expr.value))
     {
+        // "//src/x.cpp" is anchored at the project root instead of the target's folder
+        if (m_anchorPaths && l_str->value.size() > 2 && l_str->value.compare(0, 2, "//") == 0 && l_str->value[2] != '/')
+        {
+            return "\"${PROJECT_SOURCE_DIR}/" + escapeCmake(l_str->value.substr(2)) + "\"";
+        }
         return "\"" + escapeCmake(l_str->value) + "\"";
     }
     if (auto* l_num = std::get_if<IntLiteral>(&p_expr.value))
@@ -844,6 +1098,7 @@ std::string Generator::conditionToCmake(const Expression& p_expr)
     if (auto* l_id = std::get_if<Identifier>(&p_expr.value))
     {
         // if(NAME) dereferences the variable itself; "${NAME}" would break on empty values
+        if (m_optionalPackages.count(l_id->name)) return l_id->name + "_FOUND";
         return l_id->name;
     }
 
@@ -871,8 +1126,8 @@ std::string Generator::comparisonToCmake(const Comparison& p_cmp)
         if (l_leftId->name == "compiler")
         {
             if (l_rightStr->value == "msvc") return "MSVC";
-            if (l_rightStr->value == "gcc") return "CMAKE_CXX_COMPILER_ID STREQUAL \"GNU\"";
-            if (l_rightStr->value == "clang") return "CMAKE_CXX_COMPILER_ID MATCHES \"Clang\"";
+            if (l_rightStr->value == "gcc") return m_compilerIdVar + " STREQUAL \"GNU\"";
+            if (l_rightStr->value == "clang") return m_compilerIdVar + " MATCHES \"Clang\"";
         }
         if (l_leftId->name == "build_type")
         {
@@ -935,6 +1190,7 @@ std::string Generator::resolveAttribute(const Expression& p_targetExpr, const Ta
 
 std::string Generator::targetDir(const TargetDecl& p_target) const
 {
+    if (p_target.path == "." || p_target.path == "./") return ".";
     if (!p_target.path.empty())
     {
         return p_target.path;
@@ -966,7 +1222,8 @@ std::string Generator::depToCmake(const std::string& p_depName) const
     {
         std::string l_pkg = p_depName.substr(0, l_dot);
         std::string l_component = p_depName.substr(l_dot + 1);
-        std::transform(l_component.begin(), l_component.end(), l_component.begin(), ::tolower);
+        // fetched projects define their own target names (Catch2::Catch2WithMain), so their case is kept
+        if (!m_fetchedNames.count(l_pkg)) std::transform(l_component.begin(), l_component.end(), l_component.begin(), ::tolower);
         return l_pkg + "::" + l_component;
     }
 

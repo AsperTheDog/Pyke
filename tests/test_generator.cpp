@@ -529,6 +529,7 @@ void test_gen_copy_dlls_default_executable()
     ASSERT_CONTAINS(l_app, "add_custom_command(TARGET App POST_BUILD", "Copy DLLs post-build");
     ASSERT_CONTAINS(l_app, "TARGET_RUNTIME_DLLS:App", "Uses TARGET_RUNTIME_DLLS");
     ASSERT_CONTAINS(l_app, "COMMAND_EXPAND_LISTS", "Expands list");
+    ASSERT_CONTAINS(l_app, "$<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:App>>,copy_if_different,true>", "No-op when there are no DLLs");
 }
 
 void test_gen_copy_dlls_disabled()
@@ -867,6 +868,139 @@ void test_gen_root_raw_cmake_before_subdirectories()
     ASSERT_TRUE(l_root.find("set(ROOT_FLAG ON)") < l_root.find("add_subdirectory(A)"), "Raw cmake precedes add_subdirectory");
 }
 
+void test_gen_fetch_options_and_components()
+{
+    std::map<std::string, std::string> l_files = generateFrom(
+        "from github import \"google/googletest\" as GTest, tag=\"v1.14.0\", options={\"INSTALL_GTEST\": False, \"X_LEVEL\": 3, \"X_NAME\": \"a\"}\n"
+        "from github import \"catchorg/Catch2\" as Catch2, tag=\"0123456789abcdef0123456789abcdef01234567\"\n" + s_proj +
+        "@Executable\ntarget A(PRIVATE GTest.gtest_main, PRIVATE Catch2.Catch2WithMain):\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n");
+    const std::string& l_root = l_files["CMakeLists.txt"];
+    ASSERT_CONTAINS(l_root, "set(INSTALL_GTEST \"OFF\" CACHE BOOL \"\" FORCE)", "Bool fetch option");
+    ASSERT_CONTAINS(l_root, "set(X_LEVEL \"3\" CACHE STRING \"\" FORCE)", "Int fetch option");
+    ASSERT_CONTAINS(l_root, "GIT_TAG v1.14.0\n    GIT_SHALLOW TRUE", "Tags are cloned shallowly");
+    ASSERT_TRUE(l_root.find("GIT_TAG 0123456789abcdef0123456789abcdef01234567\n    GIT_SHALLOW") == std::string::npos, "Commit hashes are not shallow");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "GTest::gtest_main", "Fetch component");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "Catch2::Catch2WithMain", "Fetch component keeps its case");
+}
+
+void test_gen_defaults_and_target_properties()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj + "@SharedLibrary\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"
+        "        self.output_name = \"a-core\"\n        self.version = \"1.2.3\"\n        self.soversion = \"1\"\n        self.features = [\"cxx_std_17\"]\n");
+    ASSERT_CONTAINS(l_files["CMakeLists.txt"], "set(CMAKE_BUILD_TYPE Release CACHE STRING", "Default build type");
+    ASSERT_CONTAINS(l_files["CMakeLists.txt"], "CMAKE_EXPORT_COMPILE_COMMANDS ON", "compile_commands.json");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "set_target_properties(A PROPERTIES OUTPUT_NAME \"a-core\")", "output_name");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "SOVERSION \"1\"", "soversion");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "target_compile_features(A PRIVATE", "features");
+}
+
+void test_gen_c_and_mixed_languages()
+{
+    std::string l_tgt = "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.c\"]\n        if compiler == \"gcc\":\n            self.flags += [\"-Wall\"]\n";
+    std::map<std::string, std::string> l_c = generateFrom("project(\"T\", lang=\"c11\")\n" + l_tgt);
+    ASSERT_CONTAINS(l_c["CMakeLists.txt"], "LANGUAGES C)", "C-only project");
+    ASSERT_CONTAINS(l_c["CMakeLists.txt"], "set(CMAKE_C_STANDARD 11)", "C standard");
+    ASSERT_CONTAINS(l_c["A/CMakeLists.txt"], "CMAKE_C_COMPILER_ID STREQUAL \"GNU\"", "Compiler check uses the C compiler id");
+    std::map<std::string, std::string> l_mixed = generateFrom("project(\"T\", lang=[\"c11\", \"c++17\"])\n" + l_tgt);
+    ASSERT_CONTAINS(l_mixed["CMakeLists.txt"], "LANGUAGES C CXX)", "Mixed project");
+    ASSERT_CONTAINS(l_mixed["CMakeLists.txt"], "set(CMAKE_CXX_STANDARD 17)", "C++ standard in a mixed project");
+    ASSERT_CONTAINS(l_mixed["A/CMakeLists.txt"], "CMAKE_CXX_COMPILER_ID STREQUAL \"GNU\"", "Mixed projects check the C++ compiler");
+}
+
+void test_gen_root_level_targets()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@StaticLibrary(\".\")\ntarget core():\n    def configure(self):\n        self.sources = [\"core.cpp\"]\n"
+        "@Executable(\".\")\ntarget app(PRIVATE core):\n    def configure(self):\n        self.sources = [\"main.cpp\"]\n"
+        "@Executable(\"extra\")\ntarget tool(PRIVATE core):\n    def configure(self):\n        self.sources = [\"t.cpp\"]\n");
+    ASSERT_TRUE(l_files.count("CMakeLists.txt") == 1 && l_files.size() == 2, "Only the root and 'extra' get files");
+    const std::string& l_root = l_files["CMakeLists.txt"];
+    ASSERT_CONTAINS(l_root, "add_library(core STATIC)", "Root-level library in root file");
+    ASSERT_CONTAINS(l_root, "add_executable(app)", "Root-level executable in root file");
+    ASSERT_CONTAINS(l_root, "add_subdirectory(extra)", "Other targets keep their directories");
+    ASSERT_TRUE(l_root.find("add_subdirectory(.)") == std::string::npos, "Root is never added as a subdirectory");
+    ASSERT_TRUE(l_root.find("add_subdirectory(extra)") < l_root.find("add_executable(app)"), "Subdirectories come before root targets");
+}
+
+void test_gen_package_versions_and_optional()
+{
+    std::map<std::string, std::string> l_files = generateFrom(
+        "from packages import Boost(1.78, config=True), OpenSSL(\"3.0\"), Vulkan(optional=True), Threads\n" + s_proj +
+        "@Executable(\"app\")\ntarget app(PRIVATE Threads):\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n"
+        "        if Vulkan:\n            self.definitions = {\"HAS_VULKAN\": 1}\n");
+    const std::string& l_root = l_files["CMakeLists.txt"];
+    ASSERT_CONTAINS(l_root, "find_package(Boost 1.78 REQUIRED CONFIG)", "Version and CONFIG mode");
+    ASSERT_CONTAINS(l_root, "find_package(OpenSSL 3.0 REQUIRED)", "String version");
+    ASSERT_CONTAINS(l_root, "find_package(Vulkan)\n", "Optional packages are not REQUIRED");
+    ASSERT_CONTAINS(l_root, "find_package(Threads REQUIRED)", "Plain packages unchanged");
+    ASSERT_CONTAINS(l_files["app/CMakeLists.txt"], "if(Vulkan_FOUND)", "Optional package usable as a condition");
+}
+
+void test_gen_quality_settings()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@Executable(\"app\")\ntarget app():\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n"
+        "        self.warnings = \"strict\"\n        self.warnings_as_errors = True\n        self.sanitize = [\"address\", \"undefined\"]\n        self.lto = True\n");
+    const std::string& l_app = l_files["app/CMakeLists.txt"];
+    ASSERT_CONTAINS(l_app, ":/W4>", "MSVC strict warnings");
+    ASSERT_CONTAINS(l_app, ":-Wall;-Wextra;-Wpedantic>", "GCC/Clang strict warnings");
+    ASSERT_CONTAINS(l_app, ":/WX>", "MSVC warnings as errors");
+    ASSERT_CONTAINS(l_app, ":-Werror>", "GCC/Clang warnings as errors");
+    ASSERT_CONTAINS(l_app, "-fsanitize=address,undefined", "Sanitizers for GCC/Clang");
+    ASSERT_CONTAINS(l_app, "/fsanitize=address", "MSVC supports address only");
+    ASSERT_CONTAINS(l_app, "target_link_options(app", "Sanitizers are linked too");
+    ASSERT_CONTAINS(l_app, "check_ipo_supported", "LTO is checked before it is enabled");
+}
+
+void test_gen_root_anchored_paths()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@StaticLibrary(\"libs/core\")\ntarget core():\n    def configure(self):\n        self.sources = [\"//src/*.cpp\"]\n        self.exports.includes = [\"//include\"]\n"
+        "        self.definitions = {\"URL\": \"//cdn\"}\n");
+    const std::string& l_core = l_files["libs/core/CMakeLists.txt"];
+    ASSERT_CONTAINS(l_core, "\"${PROJECT_SOURCE_DIR}/src/*.cpp\"", "// anchors sources at the project root");
+    ASSERT_CONTAINS(l_core, "\"${PROJECT_SOURCE_DIR}/include\"", "// anchors includes at the project root");
+    ASSERT_CONTAINS(l_core, "URL=\"//cdn\"", "Non-path values are left alone");
+}
+
+void test_gen_conditional_github_import()
+{
+    std::map<std::string, std::string> l_files = generateFrom(
+        "option use_fmt: bool = False\n" + s_proj + "from github import \"fmtlib/fmt\" as fmt, tag=\"10.2.1\" if use_fmt\n"
+        "@Executable(\"app\")\ntarget app():\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n");
+    const std::string& l_root = l_files["CMakeLists.txt"];
+    ASSERT_CONTAINS(l_root, "if(use_fmt)\n    FetchContent_Declare(fmt", "Declare is guarded");
+    ASSERT_CONTAINS(l_root, "if(use_fmt)\n    FetchContent_MakeAvailable(fmt)\nendif()", "MakeAvailable is guarded");
+}
+
+void test_gen_vendor_import()
+{
+    std::map<std::string, std::string> l_files = generateFrom(
+        "option use_lz4: bool = True\n" + s_proj + "from vendor import \"third_party/lz4\" as lz4, options={\"LZ4_BUILD_CLI\": False} if use_lz4\n"
+        "@Executable(\"app\")\ntarget app():\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n        if use_lz4:\n            self.link = [lz4]\n");
+    const std::string& l_root = l_files["CMakeLists.txt"];
+    ASSERT_CONTAINS(l_root, "set(LZ4_BUILD_CLI \"OFF\" CACHE BOOL \"\" FORCE)", "Options are set before the folder is added");
+    ASSERT_CONTAINS(l_root, "if(use_lz4)\n    add_subdirectory(third_party/lz4)\nendif()", "Vendored folder added conditionally");
+    ASSERT_TRUE(l_root.find("FetchContent_Declare(lz4") == std::string::npos, "Nothing is downloaded");
+}
+
+void test_gen_export_package()
+{
+    std::map<std::string, std::string> l_files = generateFrom("from packages import ZLIB\n" + s_proj +
+        "@StaticLibrary(\"lib\")\ntarget core(PUBLIC ZLIB):\n    def configure(self):\n        self.sources = [\"c.cpp\"]\n        self.exports.includes = [\"../include\"]\n"
+        "    def install(self):\n        self.export = \"Core\"\n        self.library = \"libs\"\n        self.headers = (\"../include/\", \"include\")\n");
+    const std::string& l_lib = l_files["lib/CMakeLists.txt"];
+    ASSERT_CONTAINS(l_lib, "install(TARGETS core EXPORT CoreTargets", "Single exporting install call");
+    ASSERT_CONTAINS(l_lib, "ARCHIVE DESTINATION \"libs\"", "Library destination honoured");
+    ASSERT_CONTAINS(l_lib, "INCLUDES DESTINATION include", "Consumers get the installed include dir");
+    ASSERT_CONTAINS(l_lib, "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>", "Build-tree include path wrapped");
+    ASSERT_TRUE(l_lib.find("install(TARGETS core ARCHIVE") == std::string::npos, "No second install call");
+    const std::string& l_root = l_files["CMakeLists.txt"];
+    ASSERT_CONTAINS(l_root, "install(EXPORT CoreTargets NAMESPACE Core::", "Targets file installed with a namespace");
+    ASSERT_CONTAINS(l_root, "find_dependency(ZLIB)", "Public package dependencies are re-found by consumers");
+    ASSERT_CONTAINS(l_root, "write_basic_package_version_file", "Version file");
+}
+
 int main()
 {
     std::cout << "=== Pyke Generator Tests ===" << std::endl;
@@ -920,6 +1054,16 @@ int main()
     RUN_TEST(test_gen_boolean_conditions);
     RUN_TEST(test_gen_raw_cmake_in_target_and_root);
     RUN_TEST(test_gen_root_raw_cmake_before_subdirectories);
+    RUN_TEST(test_gen_fetch_options_and_components);
+    RUN_TEST(test_gen_c_and_mixed_languages);
+    RUN_TEST(test_gen_root_level_targets);
+    RUN_TEST(test_gen_package_versions_and_optional);
+    RUN_TEST(test_gen_quality_settings);
+    RUN_TEST(test_gen_root_anchored_paths);
+    RUN_TEST(test_gen_conditional_github_import);
+    RUN_TEST(test_gen_vendor_import);
+    RUN_TEST(test_gen_export_package);
+    RUN_TEST(test_gen_defaults_and_target_properties);
 
     std::cout << std::endl;
     std::cout << "Results: " << s_testsPassed << "/" << s_testsRun << " passed";

@@ -87,6 +87,44 @@ static std::vector<std::string> analyzeErrors(const std::string& p_rawSource)
     return l_analyzer.errors();
 }
 
+void test_package_versions_and_optional()
+{
+    std::string l_t = "@Executable(\"app\")\ntarget app(PRIVATE Vulkan):\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n";
+    ASSERT_TRUE(analyzeSource("from packages import Boost(1.78), Vulkan(optional=True)\n" + l_t), "Versions and optional are accepted");
+    ASSERT_FALSE(analyzeSource("from packages import Vulkan(1.x)\n" + l_t), "Bad version rejected");
+    std::string l_cond = "@Executable(\"app\")\ntarget app():\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n        if Vulkan:\n            self.definitions = {\"V\": 1}\n";
+    ASSERT_TRUE(analyzeSource("from packages import Vulkan(optional=True)\n" + l_cond), "Optional package usable in conditions");
+    ASSERT_FALSE(analyzeSource("from packages import Vulkan\n" + l_cond), "Required package is not a condition");
+}
+
+void test_quality_settings_validation()
+{
+    auto l_t = [](const std::string& p_line) {
+        return "@Executable(\"app\")\ntarget app():\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n        " + p_line + "\n";
+    };
+    ASSERT_TRUE(analyzeSource(l_t("self.warnings = \"strict\"")), "strict accepted");
+    ASSERT_FALSE(analyzeSource(l_t("self.warnings = \"strcit\"")), "Unknown level rejected");
+    ASSERT_TRUE(analyzeSource(l_t("self.sanitize = [\"address\", \"undefined\"]")), "Sanitizers accepted");
+    ASSERT_FALSE(analyzeSource(l_t("self.sanitize = [\"adress\"]")), "Unknown sanitizer rejected");
+    ASSERT_FALSE(analyzeSource(l_t("self.sanitize = [\"address\", \"thread\"]")), "address+thread rejected");
+    ASSERT_FALSE(analyzeSource(l_t("self.lto = \"yes\"")), "lto must be a bool");
+}
+
+void test_conditional_github_import()
+{
+    std::string l_t = "@Executable(\"app\")\ntarget app():\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n";
+    ASSERT_TRUE(analyzeSource("option use_fmt: bool = False\nfrom github import \"fmtlib/fmt\" as fmt, tag=\"10.2.1\" if use_fmt\n" + l_t), "Conditional github import accepted");
+    ASSERT_FALSE(analyzeSource("from github import \"fmtlib/fmt\" as fmt if nope\n" + l_t), "Unknown option rejected");
+}
+
+void test_vendor_import()
+{
+    std::string l_t = "@Executable(\"app\")\ntarget app(PRIVATE lz4):\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n";
+    ASSERT_TRUE(analyzeSource("from vendor import \"third_party/lz4\" as lz4\n" + l_t), "Vendor import accepted");
+    ASSERT_FALSE(analyzeSource("from vendor import \"../lz4\" as lz4\n" + l_t), "Folders outside the project rejected");
+    ASSERT_FALSE(analyzeSource("from vendor import \"app\" as lz4\n" + l_t), "Folder of a target rejected");
+}
+
 void test_valid_simple_target()
 {
     std::string l_source =
@@ -440,9 +478,58 @@ void test_variables_usable_in_targets_end_to_end()
     ASSERT_TRUE(analyzeSource("w = [\"-Wall\"]\n@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.flags += w + [\"-Werror\"]\n"), "Variables compose and validate");
 }
 
+void test_fetch_components_and_properties()
+{
+    std::string l_fetch = "from github import \"google/googletest\" as GTest\n";
+    std::string l_body = "@Executable\ntarget A(PRIVATE GTest.gtest_main):\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n";
+    ASSERT_TRUE(analyzeSource(l_fetch + l_body), "Components are allowed on github imports");
+    ASSERT_FALSE(analyzeSource("@Executable\ntarget B():\n    def configure(self):\n        self.sources = [\"b.cpp\"]\n@Executable\ntarget A(PRIVATE B.x):\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"), "Components are still rejected on local targets");
+    ASSERT_FALSE(analyzeSource("from github import \"a/b\" as B, options={\"X\": [1]}\n@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"), "Fetch option values must be scalars");
+    ASSERT_TRUE(analyzeSource("@SharedLibrary\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.output_name = \"x\"\n        self.soversion = \"1\"\n        self.features = [\"cxx_std_17\"]\n"), "Target properties are valid");
+    ASSERT_FALSE(analyzeSource("@HeaderOnly\ntarget A():\n    def configure(self):\n        self.output_name = \"x\"\n"), "output_name is rejected on header-only targets");
+    ASSERT_FALSE(analyzeSource("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.output_name = [\"x\"]\n"), "output_name must be a string");
+}
+
+void test_c_languages()
+{
+    std::string l_exe = "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.c\"]\n";
+    ASSERT_TRUE(analyzeSource("project(\"T\", lang=\"c11\")\n" + l_exe), "C standard accepted");
+    ASSERT_TRUE(analyzeSource("project(\"T\", lang=[\"c99\", \"c++20\"])\n" + l_exe), "Mixed languages accepted");
+    ASSERT_FALSE(analyzeSource("project(\"T\", lang=[\"c99\", \"c11\"])\n" + l_exe), "Two C standards rejected");
+    ASSERT_FALSE(analyzeSource("project(\"T\", lang=\"c12\")\n" + l_exe), "Unknown C standard rejected");
+}
+
+void test_root_level_targets()
+{
+    std::string l_a = "@Executable(\".\")\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n";
+    std::string l_b = "@Executable(\".\")\ntarget B():\n    def configure(self):\n        self.sources = [\"b.cpp\"]\n";
+    ASSERT_TRUE(analyzeSource(l_a + l_b), "Several targets may share the project root");
+    ASSERT_FALSE(analyzeSource("@Executable(\"..\")\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n"), "Parent directory is still rejected");
+}
+
+void test_export_rules()
+{
+    std::string l_lib = "@StaticLibrary\ntarget L%DEPS%:\n    def configure(self):\n        self.sources = [\"l.cpp\"]\n    def install(self):\n        self.export = \"L\"\n";
+    auto l_with = [&](const std::string& p_deps) { std::string l_s = l_lib; l_s.replace(l_s.find("%DEPS%"), 6, p_deps); return l_s; };
+    ASSERT_TRUE(analyzeSource(l_with("()")), "Exported static library");
+    ASSERT_FALSE(analyzeSource("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n    def install(self):\n        self.export = \"A\"\n"), "Executables can't be exported");
+    ASSERT_FALSE(analyzeSource("@StaticLibrary\ntarget L():\n    def configure(self):\n        self.sources = [\"l.cpp\"]\n    def install(self):\n        self.export = \"not valid\"\n"), "Package name must be an identifier");
+    std::string l_other = "@StaticLibrary\ntarget Other():\n    def configure(self):\n        self.sources = [\"o.cpp\"]\n";
+    ASSERT_FALSE(analyzeSource(l_other + l_with("(PUBLIC Other)")), "Exported targets can't depend on unexported targets");
+    ASSERT_FALSE(analyzeSource("from github import \"fmtlib/fmt\" as fmt\n" + l_with("(PUBLIC fmt)")), "Exported targets can't depend on fetched projects");
+}
+
 int main()
 {
     std::cout << "=== Pyke Analyzer Tests ===" << std::endl;
+
+    RUN_TEST(test_package_versions_and_optional);
+
+    RUN_TEST(test_quality_settings_validation);
+
+    RUN_TEST(test_conditional_github_import);
+
+    RUN_TEST(test_vendor_import);
 
     RUN_TEST(test_valid_simple_target);
     RUN_TEST(test_valid_with_internal_dep);
@@ -475,6 +562,10 @@ int main()
     RUN_TEST(test_cmake_attribute_validation);
     RUN_TEST(test_bare_name_assignment_hint);
     RUN_TEST(test_variables_usable_in_targets_end_to_end);
+    RUN_TEST(test_fetch_components_and_properties);
+    RUN_TEST(test_c_languages);
+    RUN_TEST(test_root_level_targets);
+    RUN_TEST(test_export_rules);
 
     std::cout << std::endl;
     std::cout << "Results: " << s_testsPassed << "/" << s_testsRun << " passed";

@@ -99,7 +99,8 @@ void test_parse_project()
     ASSERT_TRUE(l_prog.project.has_value(), "Should have project");
     ASSERT_EQ(l_prog.project->name, std::string("MyProject"), "Project name");
     ASSERT_EQ(l_prog.project->version, std::string("1.0.0"), "Project version");
-    ASSERT_EQ(l_prog.project->lang, std::string("c++20"), "Project language");
+    ASSERT_EQ(l_prog.project->langs.size(), (size_t)1, "One project language");
+    ASSERT_EQ(l_prog.project->langs[0], std::string("c++20"), "Project language");
 }
 
 void test_parse_option_bool()

@@ -1,0 +1,24 @@
+# Header-only library + executable using find_package and configure_file
+
+from packages import Threads
+
+project("PackagesApp", version="2.0.1", lang="c++20")
+
+@HeaderOnly("libs/hdr")
+target hdr():
+    def configure(self):
+        self.exports.includes = ["include"]
+
+@Executable("src")
+target app(PRIVATE hdr, PRIVATE Threads):
+    def configure(self):
+        self.sources = ["main.cpp"]
+        self.includes = ["${CMAKE_CURRENT_BINARY_DIR}"]
+        self.cmake += ["configure_file(version.h.in version.h @ONLY)"]
+    def install(self):
+        self.runtime = "bin"
+
+@Executable("tests", test=True)
+target hdr_tests(PRIVATE hdr):
+    def configure(self):
+        self.sources = ["t.cpp"]

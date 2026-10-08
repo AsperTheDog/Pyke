@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build pyke and its unit tests
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Example projects (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: tests/run_examples.sh build/pyke
+
+      - name: Example projects (Windows, Visual Studio generator)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tests/run_examples.ps1 -Pyke build/Release/pyke.exe
+
+      - name: Example projects (Windows, Ninja + MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Import-Module "$env:ProgramFiles\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Microsoft.VisualStudio.DevShell.dll" -ErrorAction SilentlyContinue
+          Enter-VsDevShell -VsInstallPath "$env:ProgramFiles\Microsoft Visual Studio\2022\Enterprise" -SkipAutomaticLocation -DevCmdArguments "-arch=x64" -ErrorAction SilentlyContinue
+          tests/run_examples.ps1 -Pyke build/Release/pyke.exe -Generator Ninja
+
+      - name: Self-hosting (pyke.pyke builds pyke)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir selfhost && cp pyke.pyke selfhost/ && cp -r src tests selfhost/
+          cd selfhost && ../build/pyke pyke.pyke . && cmake -S . -B _b && cmake --build _b
