@@ -1,0 +1,20 @@
+# C++20 modules: a library that exports a module, an app that imports it.
+# Needs CMake 3.28+, the Ninja or Visual Studio 2022 (17.4+) generator, and GCC 14+, Clang 16+ or MSVC 19.34+.
+# (Skipped in CI, which runs on older compilers: see .skip-in-ci. Delete that file to opt in.)
+#
+# For `import std;` use lang="c++23" and add import_std=True to project(): needs CMake 3.30+,
+# GCC 15+/Clang 18.1.2+/MSVC 19.36+ and the Ninja generator (Visual Studio generators can't build it yet).
+project("Modules", version="1.0.0", lang="c++20")
+
+@StaticLibrary("geometry")
+target geometry():
+    def configure(self):
+        self.sources = ["shapes.cpp"]  # implementation unit: `module geometry;`
+        self.exports.modules = ["geometry.cppm"]  # primary interface: `export module geometry;`
+        self.modules = ["internal_math.cppm"]  # private to the library; only its own files can import it
+
+@Executable("app", test=True)
+target app(PRIVATE geometry):
+    def configure(self):
+        self.sources = ["main.cpp"]
+        self.warnings = "all"

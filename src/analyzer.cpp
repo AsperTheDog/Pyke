@@ -1,4 +1,5 @@
 #include "analyzer.hpp"
+#include <cstdlib>
 #include "suggest.hpp"
 #include <algorithm>
 #include <cctype>
@@ -22,11 +23,11 @@ const std::set<std::string> s_configureAttrs = {
     "sources", "includes", "definitions", "flags", "link", "link_dirs",
     "copy_files", "pch", "assets", "commands", "cmake",
     "output_name", "version", "soversion", "features",
-    "warnings", "warnings_as_errors", "sanitize", "lto",
+    "warnings", "warnings_as_errors", "sanitize", "lto", "modules",
 };
 
 const std::set<std::string> s_exportableAttrs = {
-    "includes", "definitions", "flags", "link", "link_dirs", "pch", "features",
+    "includes", "definitions", "flags", "link", "link_dirs", "pch", "features", "modules",
 };
 
 const std::set<std::string> s_installAttrs = {"runtime", "library", "headers", "export"};
@@ -281,6 +282,23 @@ void Analyzer::validateProject()
     }
     if (l_cxxCount > 1 || l_cCount > 1) error(l_where + "lang lists at most one C++ standard and one C standard, e.g. lang=[\"c11\", \"c++17\"]");
 
+    std::string l_cxxStd;
+    for (const std::string& l_lang : l_proj.langs)
+    {
+        if (s_standards.count(l_lang)) l_cxxStd = l_lang;
+    }
+    auto l_stdYear = [](const std::string& p_std) { return p_std.size() >= 5 ? std::atoi(p_std.c_str() + 3) : 0; };
+    bool l_usesModules = false;
+    for (const TargetDecl& l_t : m_program.targets) l_usesModules = l_usesModules || targetUsesModules(l_t);
+    if (l_usesModules && l_stdYear(l_cxxStd) < 20)
+    {
+        error(l_where + "C++ modules need lang=\"c++20\" or newer" + (l_cxxStd.empty() ? " (the project has no C++ standard)" : " (the project uses " + l_cxxStd + ")"));
+    }
+    if (l_proj.importStd && l_stdYear(l_cxxStd) < 23)
+    {
+        error(l_where + "import_std needs lang=\"c++23\" or newer (the standard library module is part of C++23)");
+    }
+
     if (!l_proj.outputDir.empty())
     {
         std::string l_norm = normalizePath(l_proj.outputDir);
@@ -453,6 +471,11 @@ void Analyzer::validateExports()
         std::string l_name = exportName(l_target);
         if (l_name.empty() || l_target.type == TargetType::EXECUTABLE) continue;
 
+        if (targetUsesModules(l_target))
+        {
+            errorAt(l_target.line, l_target.column, "target '" + l_target.name + "' is exported as '" + l_name + "' but declares C++ modules; installing module interfaces is not supported yet");
+        }
+
         for (const Dependency& l_dep : l_target.dependencies)
         {
             std::string l_base = basePackage(l_dep.name);
@@ -579,7 +602,7 @@ void Analyzer::validateStatement(const TargetDecl& p_target, const Method& p_met
 
     if (l_ref.exported && !s_exportableAttrs.count(l_ref.name))
     {
-        errorAt(l_line, l_ref.column, l_who + "'" + l_ref.name + "' cannot be exported (self.exports supports: includes, definitions, flags, link, link_dirs, pch)");
+        errorAt(l_line, l_ref.column, l_who + "'" + l_ref.name + "' cannot be exported (self.exports supports: includes, definitions, flags, link, link_dirs, pch, features, modules)");
         return;
     }
     if (l_ref.indexed && l_ref.name != "definitions")
@@ -587,7 +610,7 @@ void Analyzer::validateStatement(const TargetDecl& p_target, const Method& p_met
         error(l_ctx + "only 'definitions' supports item assignment");
         return;
     }
-    if (l_ref.name == "sources") p_sawSources = true;
+    if (l_ref.name == "sources" || l_ref.name == "modules") p_sawSources = true;
     if (l_ref.name == "commands") p_sawSources = true;
 
     if (l_ref.indexed)
@@ -644,7 +667,7 @@ void Analyzer::validateAttributeValue(const TargetDecl& p_target, const std::str
         return;
     }
 
-    if (p_attr == "features")
+    if (p_attr == "features" || p_attr == "modules")
     {
         l_requireStringList(false);
         return;

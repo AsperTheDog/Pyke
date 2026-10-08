@@ -34,6 +34,7 @@ function Step([string]$Log, [scriptblock]$Cmd) {
 
 foreach ($dir in Get-ChildItem (Join-Path $Root "examples/projects") -Directory) {
     $name = $dir.Name
+    if ($env:CI -and (Test-Path (Join-Path $dir.FullName ".skip-in-ci"))) { Write-Host "SKIP  $name (needs a newer toolchain than CI has)"; continue }
     $source = Get-Content (Join-Path $dir.FullName "app.pyke") -Raw
     if ($Offline -and $source -match "(?m)^from github") { Write-Host "SKIP  $name (needs network)"; continue }
 

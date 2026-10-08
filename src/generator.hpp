@@ -55,6 +55,8 @@ private:
     static std::string rawCmakeBlock(const std::string& p_text, const std::string& p_indent);
     std::string comparisonToCmake(const Comparison& p_cmp);
     static std::string cmakeConfigName(const std::string& p_buildType);
+    SourceSet& sourceSetFor(const TargetDecl& p_target);
+    void emitModules(const std::string& p_visibility, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel);
     void emitQualityAttribute(const std::string& p_attr, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel);
     void emitAssignment(const Expression& p_lhs, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel);
 
@@ -70,6 +72,7 @@ private:
     std::set<std::string> m_targetNames;
     std::set<std::string> m_importedPackages;
     std::set<std::string> m_optionalPackages;
+    bool m_usesModules = false;
     bool m_anchorPaths = false; // while emitting path attributes, "//x" means "<project root>/x"
     std::set<std::string> m_fetchedNames;
     std::string m_currentExport; // package name of the target being generated, if exported

@@ -125,6 +125,16 @@ void test_vendor_import()
     ASSERT_FALSE(analyzeSource("from vendor import \"app\" as lz4\n" + l_t), "Folder of a target rejected");
 }
 
+void test_cxx_modules_validation()
+{
+    std::string l_t = "@StaticLibrary(\"m\")\ntarget m():\n    def configure(self):\n        self.exports.modules = [\"m.cppm\"]\n";
+    ASSERT_TRUE(analyzeSource("project(\"T\", lang=\"c++20\")\n" + l_t), "Modules-only target is valid on c++20");
+    ASSERT_FALSE(analyzeSource("project(\"T\", lang=\"c++17\")\n" + l_t), "Modules need c++20");
+    ASSERT_FALSE(analyzeSource("project(\"T\", lang=\"c++20\", import_std=True)\n" + l_t), "import_std needs c++23");
+    ASSERT_TRUE(analyzeSource("project(\"T\", lang=\"c++23\", import_std=True)\n" + l_t), "import_std is valid on c++23");
+    ASSERT_FALSE(analyzeSource("project(\"T\", lang=\"c++20\")\n" + l_t + "    def install(self):\n        self.export = \"M\"\n"), "Exported targets cannot ship modules yet");
+}
+
 void test_valid_simple_target()
 {
     std::string l_source =
@@ -530,6 +540,8 @@ int main()
     RUN_TEST(test_conditional_github_import);
 
     RUN_TEST(test_vendor_import);
+
+    RUN_TEST(test_cxx_modules_validation);
 
     RUN_TEST(test_valid_simple_target);
     RUN_TEST(test_valid_with_internal_dep);

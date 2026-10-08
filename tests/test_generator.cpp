@@ -994,6 +994,26 @@ void test_gen_recursive_glob_and_assets()
     ASSERT_CONTAINS(l_app, "\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\"", "Asset paths are quoted as a whole");
 }
 
+void test_gen_cxx_modules()
+{
+    std::map<std::string, std::string> l_files = generateFrom(
+        "project(\"M\", lang=\"c++23\", import_std=True)\n"
+        "@StaticLibrary(\"math\")\ntarget math():\n    def configure(self):\n        self.exports.modules = [\"math.cppm\", \"detail/**/*.cppm\"]\n        self.modules = [\"//mods/internal.ixx\"]\n"
+        "@HeaderOnly(\"h\")\ntarget h():\n    def configure(self):\n        self.modules = [\"h.cppm\"]\n");
+    const std::string& l_root = l_files["CMakeLists.txt"];
+    ASSERT_CONTAINS(l_root, "cmake_minimum_required(VERSION 3.28)", "Modules raise the minimum CMake version");
+    ASSERT_CONTAINS(l_root, "CMAKE_EXPERIMENTAL_CXX_IMPORT_STD", "import_std switches the experimental feature on");
+    ASSERT_CONTAINS(l_root, "set(CMAKE_CXX_MODULE_STD ON)", "import_std enables the std module");
+    const std::string& l_math = l_files["math/CMakeLists.txt"];
+    ASSERT_CONTAINS(l_math, "target_sources(math PUBLIC\n    FILE_SET CXX_MODULES BASE_DIRS \"${PROJECT_SOURCE_DIR}\" FILES", "Exported modules are a PUBLIC file set");
+    ASSERT_CONTAINS(l_math, "file(GLOB_RECURSE math_MODULES_0 CONFIGURE_DEPENDS\n    \"detail/*.cppm\"", "Module globs may recurse");
+    ASSERT_CONTAINS(l_math, "target_sources(math PRIVATE\n    FILE_SET private_modules TYPE CXX_MODULES", "self.modules is private");
+    ASSERT_CONTAINS(l_math, "\"${PROJECT_SOURCE_DIR}/mods/internal.ixx\"", "// anchors module paths");
+    ASSERT_CONTAINS(l_files["h/CMakeLists.txt"], "target_sources(h INTERFACE", "Header-only modules are INTERFACE");
+    std::map<std::string, std::string> l_plain = generateFrom(s_proj + "@Executable(\"a\")\ntarget a():\n    def configure(self):\n        self.sources = [\"m.cpp\"]\n");
+    ASSERT_CONTAINS(l_plain["CMakeLists.txt"], "cmake_minimum_required(VERSION 3.21)", "Projects without modules keep 3.21");
+}
+
 void test_gen_export_package()
 {
     std::map<std::string, std::string> l_files = generateFrom("from packages import ZLIB\n" + s_proj +
@@ -1073,6 +1093,7 @@ int main()
     RUN_TEST(test_gen_conditional_github_import);
     RUN_TEST(test_gen_vendor_import);
     RUN_TEST(test_gen_recursive_glob_and_assets);
+    RUN_TEST(test_gen_cxx_modules);
     RUN_TEST(test_gen_export_package);
     RUN_TEST(test_gen_defaults_and_target_properties);
 

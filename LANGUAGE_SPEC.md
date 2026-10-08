@@ -43,6 +43,7 @@ project("GameEngine", version="0.1.0", lang="c++20")
 - `name` (positional): project name string
 - `version` (keyword): version string of numbers separated by dots
 - `lang` (keyword): Language standard: C++ (`"c++11"` … `"c++26"`), C (`"c90"`, `"c99"`, `"c11"`, `"c17"`, `"c23"`), or a list for a mixed project, e.g. `lang=["c11", "c++17"]`. A C-only project enables only the C language, and `compiler == ...` conditions then test the C compiler.
+- `import_std` (keyword, optional): `import_std=True` enables `import std;` for C++ modules
 - `output_dir` (keyword, optional): folder inside the build directory that receives built executables and libraries
 - `presets` (keyword, optional): `presets=True` also writes a `CMakePresets.json`
 - The root file also sets `CMAKE_BUILD_TYPE` to `Release` when none is given (single-config generators) and turns on `compile_commands.json`.
@@ -310,10 +311,12 @@ target core():
 | `self.warnings_as_errors` | bool | `/WX` or `-Werror` |
 | `self.sanitize` | list[str] | `"address"`, `"undefined"`, `"thread"`, `"leak"` |
 | `self.lto` | bool | Link-time optimization (checked with `check_ipo_supported`; warns if unavailable) |
+| `self.modules` | list[str] | C++ module files, private to the target: see [C++ modules](#c-modules) |
 | `self.cmake` | list[str] | Raw CMake lines, copied verbatim |
 | `self.exports.includes` | list[str] | `target_include_directories(... PUBLIC)` |
 | `self.exports.definitions` | dict[str, value] | `target_compile_definitions(... PUBLIC)` |
 | `self.exports.flags` | list[str] | `target_compile_options(... PUBLIC)` |
+| `self.exports.modules` | list[str] | C++ module files that targets linking this one can `import` |
 
 For `@HeaderOnly` targets, all attributes are treated as `INTERFACE` automatically (`warnings`, `warnings_as_errors`, `sanitize`, `lto` do not apply to them).
 
@@ -334,6 +337,33 @@ One setting, translated for each compiler family:
         if build_type == "debug":
             self.sanitize = ["address", "undefined"]
 ```
+
+#### C++ modules
+
+List module interface files in `modules` (private to the target) or `exports.modules` (importable by targets that link it), the same way `includes` and `exports.includes` work:
+
+```python
+project("Calc", lang="c++23", import_std=True)
+
+@StaticLibrary("math")
+target math():
+    def configure(self):
+        self.sources = ["impl.cpp"]                         # module implementation units and ordinary files
+        self.exports.modules = ["math.cppm", "ops/**/*.cppm"]
+
+@Executable("app")
+target app(PRIVATE math):
+    def configure(self):
+        self.sources = ["main.cpp"]                         # contains: import math;
+```
+
+- Becomes a `CXX_MODULES` file set (`target_sources(... FILE_SET CXX_MODULES ...)`); CMake scans the sources for `import`/`export module` itself, so linking the library is all a consumer needs.
+- Globs (`*`, `**`) and `//` root-anchored paths work. Missing files get a stub (`export module name;`).
+- Any use of modules raises the generated `cmake_minimum_required` to 3.28 and requires `lang="c++20"` or newer.
+- `import_std=True` in `project(...)` enables `import std;` (needs `lang="c++23"`, CMake 3.30+, Clang 18.1.2+, GCC 15+ or MSVC 19.36+). CMake still treats this as experimental and changes its opt-in key between releases; pyke knows the keys for 3.30 to 4.4, so a newer CMake may need pyke updated. Visual Studio generators cannot build the std module: use Ninja.
+- Modules need the Ninja or Visual Studio generators, and GCC 14+, Clang 16+ or MSVC 19.34+. `pyke build` picks Ninja when it is installed and reports an error when only Makefiles are available.
+- A target can mix `modules` and `exports.modules` (they become two file sets, the private one named `private_modules`).
+- Targets that are installed with `self.export` cannot contain modules yet.
 
 #### Builtin variables available in `configure()`
 

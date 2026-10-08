@@ -485,6 +485,7 @@ ProjectDecl Parser::parseProject()
                 bool l_val = check(TokenType::TRUE_KW);
                 advance();
                 if (l_key == "presets") l_decl.presets = l_val;
+                else if (l_key == "import_std") l_decl.importStd = l_val;
                 else error("Unknown project keyword: " + l_key);
             }
             else

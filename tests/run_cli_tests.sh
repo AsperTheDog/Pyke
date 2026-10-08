@@ -87,6 +87,16 @@ printf 'project("T")\n@StaticLibrary("lib")\ntarget lib():\n    def configure(se
 mkdir -p lib
 check "an empty glob is reported" contains <("$PYKE" glob.pyke . 2>&1) 'matches no files'
 
+echo "C++ modules"
+newproj mods
+cd "$WORK/mods"
+printf 'project("T", lang="c++20")\n@StaticLibrary("m")\ntarget m():\n    def configure(self):\n        self.exports.modules = ["my-mod.cppm"]\n' > mods.pyke
+"$PYKE" mods.pyke . >/dev/null 2>&1
+check "module files get an export module stub" contains m/my-mod.cppm "export module my_mod;"
+check "modules raise the minimum CMake version" contains CMakeLists.txt "VERSION 3.28"
+sed -i 's/c++20/c++17/' mods.pyke
+check "modules on c++17 are rejected" fails "$PYKE" --validate mods.pyke
+
 echo "--init"
 mkdir -p "$WORK/init/src" "$WORK/init/include"
 echo 'int main() { return 0; }' > "$WORK/init/src/main.cpp"

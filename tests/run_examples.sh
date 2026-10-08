@@ -10,6 +10,7 @@ trap 'rm -rf "$WORK"' EXIT
 fail=0
 for dir in "$ROOT"/examples/projects/*/; do
     name="$(basename "$dir")"
+    if [ -n "${CI:-}" ] && [ -f "$dir/.skip-in-ci" ]; then echo "SKIP  $name (needs a newer toolchain than CI has)"; continue; fi
     if [ -n "${PYKE_OFFLINE:-}" ] && grep -q "^from github" "$dir/app.pyke"; then echo "SKIP  $name (needs network)"; continue; fi
     cp -r "$dir" "$WORK/$name"
     (

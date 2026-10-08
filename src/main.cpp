@@ -233,7 +233,7 @@ void globExpand(const fs::path& p_dir, const std::vector<std::string>& p_parts, 
 
 bool isCompiledSource(const fs::path& p_path)
 {
-    static const std::set<std::string> s_exts = {".c", ".cc", ".cpp", ".cxx", ".c++"};
+    static const std::set<std::string> s_exts = {".c", ".cc", ".cpp", ".cxx", ".c++", ".cppm", ".ixx", ".mpp", ".cxxm", ".c++m", ".ccm"};
     return s_exts.count(p_path.extension().string()) > 0;
 }
 
@@ -300,6 +300,8 @@ struct BuildOptions
     std::string target;
     std::string jobs;
     std::string input;
+    bool usesModules = false;
+    bool importStd = false;
 };
 
 std::string shellQuote(const std::string& p_arg)
@@ -352,8 +354,38 @@ int runBuild(const BuildOptions& p_opts, const fs::path& p_root)
         return 1;
     }
     fs::path l_buildDir = p_root / "build";
+    bool l_ninja = toolAvailable("ninja");
+    if (p_opts.usesModules)
+    {
+        // C++ modules need a generator that can order compilation by module dependencies: Ninja or Visual Studio
+        std::ifstream l_cache(l_buildDir / "CMakeCache.txt");
+        std::string l_line, l_generator;
+        while (std::getline(l_cache, l_line))
+        {
+            if (l_line.rfind("CMAKE_GENERATOR:INTERNAL=", 0) == 0) l_generator = l_line.substr(25);
+        }
+        bool l_ninjaBuild = l_generator.find("Ninja") != std::string::npos;
+        bool l_supported = l_generator.empty() ? true : (l_ninjaBuild || (!p_opts.importStd && l_generator.find("Visual Studio") != std::string::npos));
+        if (!l_supported)
+        {
+            std::cerr << "Error: this project uses C++ modules" << (p_opts.importStd ? " with import std" : "") << ", but build/ was configured with '" << l_generator << "', which cannot build them; delete build/ to reconfigure with Ninja" << std::endl;
+            return 1;
+        }
+        if (l_generator.empty() && !l_ninja && p_opts.importStd)
+        {
+            std::cerr << "Error: import_std needs the Ninja generator (Visual Studio generators cannot build the std module); install ninja" << std::endl;
+            return 1;
+        }
+#ifndef _WIN32
+        if (l_generator.empty() && !l_ninja)
+        {
+            std::cerr << "Error: this project uses C++ modules, which need the Ninja generator; install ninja (not found on PATH)" << std::endl;
+            return 1;
+        }
+#endif
+    }
     std::vector<std::string> l_configure = {"cmake", "-S", p_root.string(), "-B", l_buildDir.string(), "-DCMAKE_BUILD_TYPE=" + p_opts.config};
-    if (!fs::exists(l_buildDir / "CMakeCache.txt") && toolAvailable("ninja")) l_configure.insert(l_configure.end(), {"-G", "Ninja"});
+    if (!fs::exists(l_buildDir / "CMakeCache.txt") && l_ninja) l_configure.insert(l_configure.end(), {"-G", "Ninja"});
     if (runCommand(l_configure) != 0) return 1;
 
     std::vector<std::string> l_build = {"cmake", "--build", l_buildDir.string(), "--config", p_opts.config};
@@ -836,6 +868,13 @@ int main(int argc, char* argv[])
         {
             l_stub << "#pragma once\n";
         }
+        else if (l_ext == ".cppm" || l_ext == ".ixx" || l_ext == ".mpp" || l_ext == ".cxxm" || l_ext == ".c++m" || l_ext == ".ccm")
+        {
+            std::string l_module = l_filePath.stem().string();
+            for (char& l_c : l_module) if (!std::isalnum(static_cast<unsigned char>(l_c))) l_c = '_';
+            if (l_module.empty() || std::isdigit(static_cast<unsigned char>(l_module[0]))) l_module.insert(l_module.begin(), '_');
+            l_stub << "export module " << l_module << ";\n";
+        }
         else if (l_ext == ".cpp" || l_ext == ".cc" || l_ext == ".cxx")
         {
             l_stub << "// " << l_ref.file << "\n";
@@ -868,6 +907,11 @@ int main(int argc, char* argv[])
         }
     }
 
-    if (l_buildMode) return runBuild(l_build, fs::path(l_outputDir));
+    if (l_buildMode)
+    {
+        for (const pyke::TargetDecl& l_t : l_program.targets) l_build.usesModules = l_build.usesModules || pyke::targetUsesModules(l_t);
+        l_build.importStd = l_program.project && l_program.project->importStd;
+        return runBuild(l_build, fs::path(l_outputDir));
+    }
     return 0;
 }

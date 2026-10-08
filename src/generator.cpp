@@ -39,6 +39,10 @@ Generator::Generator(const Program& p_program)
         }
         m_compilerIdVar = (m_hasC && !l_cxx) ? "CMAKE_C_COMPILER_ID" : "CMAKE_CXX_COMPILER_ID";
     }
+    for (const TargetDecl& l_target : m_program.targets)
+    {
+        if (targetUsesModules(l_target)) m_usesModules = true;
+    }
     collectPackageComponents();
 }
 
@@ -67,7 +71,17 @@ std::string Generator::generateRoot()
 {
     std::ostringstream l_out;
 
-    l_out << "cmake_minimum_required(VERSION 3.21)\n";
+    bool l_importStd = m_program.project && m_program.project->importStd;
+    l_out << "cmake_minimum_required(VERSION " << (m_usesModules || l_importStd ? "3.28" : "3.21") << ")\n";
+    if (l_importStd)
+    {
+        // `import std;` is still experimental in CMake: it has to be switched on before project(), with a key that changes between releases
+        l_out << "\nif(CMAKE_VERSION VERSION_LESS 3.30)\n    message(FATAL_ERROR \"import_std needs CMake 3.30 or newer\")\n";
+        l_out << "elseif(CMAKE_VERSION VERSION_LESS 3.31)\n    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"0e5b6991-d74f-4b3d-a41c-cf096e0b2508\")\n";
+        l_out << "elseif(CMAKE_VERSION VERSION_LESS 4.3)\n    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"d0edc3af-4c50-42ea-a356-e2862fe7a444\")\n";
+        l_out << "elseif(CMAKE_VERSION VERSION_LESS 4.4)\n    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"451f2fe2-a8a2-47c3-bc32-94786d8fc91b\")\n";
+        l_out << "else()\n    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"f35a9ac6-8463-4d38-8eec-5d6008153e7d\")\nendif()\n";
+    }
 
     if (m_program.project.has_value())
     {
@@ -91,6 +105,8 @@ std::string Generator::generateRoot()
             l_out << "\nset(" << l_var << " " << l_stdVer << ")\n";
             l_out << "set(" << l_var << "_REQUIRED ON)\n";
         }
+
+        if (l_importStd) l_out << "\nset(CMAKE_CXX_MODULE_STD ON)\n";
 
         // Single-config generators otherwise build with no optimisation flags at all
         l_out << "\nif(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)\n";
@@ -636,6 +652,69 @@ void Generator::generateAssignment(const AssignStatement& p_assign, const Target
     emitAssignment(*p_assign.target, *p_assign.value, p_target, p_out, p_indentLevel);
 }
 
+Generator::SourceSet& Generator::sourceSetFor(const TargetDecl& p_target)
+{
+    for (SourceSet& l_existing : m_sourceSets)
+    {
+        if (l_existing.target == p_target.name) return l_existing;
+    }
+    m_sourceSets.push_back({p_target.name, m_currentTargetDir, {}});
+    return m_sourceSets.back();
+}
+
+// self.modules / self.exports.modules: a CXX_MODULES file set (CMake 3.28+)
+void Generator::emitModules(const std::string& p_visibility, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel)
+{
+    auto* l_list = std::get_if<ListLiteral>(&p_rhs.value);
+    if (!l_list || l_list->elements.empty()) return;
+    std::string l_ind = indent(p_indentLevel);
+    SourceSet& l_set = sourceSetFor(p_target);
+
+    std::vector<std::string> l_flat, l_recursive, l_files;
+    for (const ExprPtr& l_elem : l_list->elements)
+    {
+        std::string l_text = exprToCmake(*l_elem);
+        auto* l_str = std::get_if<StringLiteral>(&l_elem->value);
+        if (l_str)
+        {
+            const std::string& l_v = l_str->value;
+            bool l_anchored = l_v.size() > 2 && l_v.compare(0, 2, "//") == 0;
+            l_set.entries.push_back((l_anchored ? std::filesystem::path(l_v.substr(2)) : std::filesystem::path(m_currentTargetDir) / l_v).lexically_normal().generic_string());
+            if (l_v.find('*') == std::string::npos)
+            {
+                m_sourceRefs.push_back({l_anchored ? "." : m_currentTargetDir, l_anchored ? l_v.substr(2) : l_v});
+                l_files.push_back(l_text);
+                continue;
+            }
+        }
+        size_t l_pos = l_text.find("/**/");
+        if (l_pos != std::string::npos)
+        {
+            l_text.replace(l_pos, 4, "/");
+            l_recursive.push_back(l_text);
+        }
+        else l_flat.push_back(l_text);
+    }
+
+    for (int l_pass = 0; l_pass < 2; ++l_pass)
+    {
+        const std::vector<std::string>& l_patterns = l_pass == 0 ? l_flat : l_recursive;
+        if (l_patterns.empty()) continue;
+        std::string l_var = p_target.name + "_MODULES_" + std::to_string(m_globCounter++);
+        p_out += l_ind + (l_pass == 0 ? "file(GLOB " : "file(GLOB_RECURSE ") + l_var + " CONFIGURE_DEPENDS\n";
+        for (const std::string& l_pattern : l_patterns) p_out += l_ind + "    " + l_pattern + "\n";
+        p_out += l_ind + ")\n";
+        l_files.push_back("${" + l_var + "}");
+    }
+
+    p_out += l_ind + "target_sources(" + p_target.name + " " + p_visibility + "\n";
+    // A target has one CXX_MODULES set per scope: the default-named set is the public one, private modules get their own
+    std::string l_setSpec = p_visibility == "PRIVATE" ? "FILE_SET private_modules TYPE CXX_MODULES" : "FILE_SET CXX_MODULES";
+    p_out += l_ind + "    " + l_setSpec + " BASE_DIRS \"${PROJECT_SOURCE_DIR}\" FILES\n";
+    for (const std::string& l_file : l_files) p_out += l_ind + "        " + l_file + "\n";
+    p_out += l_ind + ")\n";
+}
+
 // warnings / warnings_as_errors / sanitize / lto: one setting, translated per compiler family
 void Generator::emitQualityAttribute(const std::string& p_attr, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel)
 {
@@ -701,7 +780,7 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
 {
     std::string l_visibility;
     std::string l_attr = resolveAttribute(p_lhs, p_target, l_visibility);
-    static const std::set<std::string> s_pathAttrs = {"sources", "includes", "link_dirs", "copy_files", "pch", "assets", "headers"};
+    static const std::set<std::string> s_pathAttrs = {"sources", "includes", "link_dirs", "copy_files", "pch", "assets", "headers", "modules"};
     struct AnchorScope
     {
         bool& flag;
@@ -764,16 +843,7 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
         if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
         {
             bool l_hasGlob = false;
-            SourceSet* l_set = nullptr;
-            for (SourceSet& l_existing : m_sourceSets)
-            {
-                if (l_existing.target == p_target.name) l_set = &l_existing;
-            }
-            if (!l_set)
-            {
-                m_sourceSets.push_back({p_target.name, m_currentTargetDir, {}});
-                l_set = &m_sourceSets.back();
-            }
+            SourceSet* l_set = &sourceSetFor(p_target);
             for (const ExprPtr& l_elem : l_list->elements)
             {
                 if (auto* l_s = std::get_if<StringLiteral>(&l_elem->value))
@@ -847,6 +917,7 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
         emitQualityAttribute(l_attr, p_rhs, p_target, p_out, p_indentLevel);
         return;
     }
+    if (l_attr == "modules") { emitModules(l_visibility, p_rhs, p_target, p_out, p_indentLevel); return; }
     if (l_attr == "features") { emitListCommand("target_compile_features", p_target, l_visibility, p_rhs, p_out, p_indentLevel); return; }
 
     if (l_attr == "includes") { emitListCommand("target_include_directories", p_target, l_visibility, p_rhs, p_out, p_indentLevel); return; }

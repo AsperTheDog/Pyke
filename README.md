@@ -57,6 +57,7 @@ pyke --upgrade my_project.pyke      # list GitHub dependencies and their tags
 - **Conditionals:** `if`/`elif`/`else` on `platform`, `compiler`, `build_type`, options and optional packages, combined with `and`/`or`/`not`
 - **Reuse:** top-level constants (`warnings = [...]`) and f-strings (`f"{self.name}-{version}"`)
 - **Root-anchored paths:** `"//src/*.cpp"` instead of `"../../src/*.cpp"`
+- **C++ modules:** `self.exports.modules = ["math.cppm"]` declares module interfaces; `import_std=True` for `import std;`
 - **Installable libraries:** `self.export = "Name"` writes a `find_package()`-able package
 - **Escape hatch:** `cmake("...")` and `self.cmake += [...]` for anything Pyke has no syntax for
 
@@ -78,7 +79,7 @@ cp -r vscode-extension ~/.vscode/extensions/pyke.pyke-language-0.1.0
 
 ## Examples
 
-Complete projects (sources included) live in [`examples/projects/`](examples/projects): a conventional `include/src/app/tests` library, a package-using app, a shared plugin, a C project, an installable library with a `find_package` consumer, and an app with GitHub dependencies.
+Complete projects (sources included) live in [`examples/projects/`](examples/projects): a conventional `include/src/app/tests` library, a package-using app, a shared plugin, a C project, an installable library with a `find_package` consumer, an app with GitHub dependencies, and C++20 modules (`cxx_modules`, skipped when the `CI` environment variable is set because CI compilers are too old; run it locally with `tests/run_examples.ps1` or `.sh`).
 
 ## Tests
 

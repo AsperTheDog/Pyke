@@ -179,6 +179,7 @@ struct ProjectDecl
     std::vector<std::string> langs; // "c++20", "c11", or several for a mixed project
     std::string outputDir;
     bool presets = false;
+    bool importStd = false; // `import std;` in C++ modules (C++23)
     int line = 0;
 };
 
@@ -255,6 +256,39 @@ inline const Expression* installValue(const TargetDecl& p_target, const std::str
         }
     }
     return nullptr;
+}
+
+// True if configure() assigns `self.modules` / `self.exports.modules` anywhere, including inside if blocks
+inline bool statementsUseModules(const std::vector<StmtPtr>& p_body)
+{
+    for (const StmtPtr& l_stmt : p_body)
+    {
+        const Expression* l_lhs = nullptr;
+        if (auto* l_assign = std::get_if<AssignStatement>(&l_stmt->value)) l_lhs = l_assign->target.get();
+        else if (auto* l_aug = std::get_if<AugAssignStatement>(&l_stmt->value)) l_lhs = l_aug->target.get();
+        else if (auto* l_if = std::get_if<IfStatement>(&l_stmt->value))
+        {
+            for (const IfBranch& l_branch : l_if->branches)
+            {
+                if (statementsUseModules(l_branch.body)) return true;
+            }
+        }
+        if (l_lhs)
+        {
+            auto* l_dot = std::get_if<DotAccess>(&l_lhs->value);
+            if (l_dot && l_dot->member == "modules") return true;
+        }
+    }
+    return false;
+}
+
+inline bool targetUsesModules(const TargetDecl& p_target)
+{
+    for (const Method& l_method : p_target.methods)
+    {
+        if (l_method.name == "configure" && statementsUseModules(l_method.body)) return true;
+    }
+    return false;
 }
 
 // The package name from `self.export = "Name"` in install(), or empty
