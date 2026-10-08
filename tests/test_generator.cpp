@@ -984,6 +984,16 @@ void test_gen_vendor_import()
     ASSERT_TRUE(l_root.find("FetchContent_Declare(lz4") == std::string::npos, "Nothing is downloaded");
 }
 
+void test_gen_recursive_glob_and_assets()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj +
+        "@Executable(\"app\")\ntarget app():\n    def configure(self):\n        self.sources = [\"src/**/*.cpp\", \"main.cpp\", \"*.c\"]\n        self.assets = [\"shaders\"]\n");
+    const std::string& l_app = l_files["app/CMakeLists.txt"];
+    ASSERT_CONTAINS(l_app, "file(GLOB_RECURSE app_SOURCES_1 CONFIGURE_DEPENDS\n    \"src/*.cpp\"", "** searches subfolders");
+    ASSERT_CONTAINS(l_app, "file(GLOB app_SOURCES_0 CONFIGURE_DEPENDS\n    \"main.cpp\"", "Plain patterns stay flat");
+    ASSERT_CONTAINS(l_app, "\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\"", "Asset paths are quoted as a whole");
+}
+
 void test_gen_export_package()
 {
     std::map<std::string, std::string> l_files = generateFrom("from packages import ZLIB\n" + s_proj +
@@ -1062,6 +1072,7 @@ int main()
     RUN_TEST(test_gen_root_anchored_paths);
     RUN_TEST(test_gen_conditional_github_import);
     RUN_TEST(test_gen_vendor_import);
+    RUN_TEST(test_gen_recursive_glob_and_assets);
     RUN_TEST(test_gen_export_package);
     RUN_TEST(test_gen_defaults_and_target_properties);
 

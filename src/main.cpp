@@ -206,6 +206,16 @@ void globExpand(const fs::path& p_dir, const std::vector<std::string>& p_parts, 
     if (p_index == p_parts.size()) return;
     const std::string& l_part = p_parts[p_index];
     bool l_last = p_index + 1 == p_parts.size();
+    if (l_part == "**")
+    {
+        // zero or more folders
+        globExpand(p_dir, p_parts, p_index + 1, p_out);
+        for (fs::directory_iterator l_it(p_dir, l_ec), l_end; !l_ec && l_it != l_end; l_it.increment(l_ec))
+        {
+            if (l_it->is_directory(l_ec)) globExpand(l_it->path(), p_parts, p_index, p_out);
+        }
+        return;
+    }
     if (l_part.find_first_of("*?") == std::string::npos)
     {
         fs::path l_next = p_dir / l_part;

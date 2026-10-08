@@ -23,47 +23,54 @@ target app(PRIVATE core, PRIVATE fmt):
         self.sources = ["src/main.cpp"]
 ```
 
-## Building
+## Building Pyke
+
+Needs a C++20 compiler and CMake 3.20+.
 
 ```bash
-cd pyke
-mkdir build && cd build
-cmake ..
-cmake --build . --config Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build -C Release     # unit tests + command-line tests
 ```
 
 ## Usage
 
 ```bash
 pyke my_project.pyke output_dir/    # generate CMake files (only rewrites what changed)
-pyke --clean my_project.pyke out/   # also delete files from removed targets
-pyke --force my_project.pyke out/   # overwrite files pyke did not generate (refused by default)
-pyke --init my_project/             # scaffold .pyke from existing directory
-pyke --validate my_project.pyke     # check without generating
-pyke --fmt my_project.pyke          # format (add --check to fail instead, for CI)
 pyke build                          # generate + configure + build in ./build (--debug, --target X, -j N)
 pyke test                           # same, then run ctest
-pyke --upgrade my_project.pyke      # list FetchContent deps and their tags
+pyke --validate my_project.pyke     # check without generating
+pyke --fmt my_project.pyke          # format (add --check to fail instead, for CI)
+pyke --init my_project/             # scaffold a .pyke from an existing directory
+pyke --clean my_project.pyke out/   # also delete files from removed targets
+pyke --force my_project.pyke out/   # overwrite files pyke did not generate (refused by default)
+pyke --upgrade my_project.pyke      # list GitHub dependencies and their tags
 ```
 
 ## Features
 
-- **Imports:** `from packages import Boost(1.78), Vulkan(optional=True)`, `from github import` (FetchContent), `from vendor import` (folders with their own CMakeLists.txt), `from env import`, conditional imports
-- **Target types:** `@Executable`, `@SharedLibrary`, `@StaticLibrary`, `@HeaderOnly`
-- **Decorator options:** `path`, `source_groups`, `copy_dlls`, `test`, `unity_build`
-- **Conditionals:** `if`/`elif`/`else` on `platform`, `compiler`, `build_type`, and user options, combined with `and`/`or`/`not`
-- **Reuse:** top-level constants (`warnings = [...]`) and f-strings (`f"{self.name}-{version}"`)
-- **Escape hatch:** `cmake("...")` and `self.cmake += [...]` for anything Pyke has no syntax for
-- **Good errors:** line/column, source snippet and "did you mean" suggestions
-- **Attributes:** `sources`, `includes`, `definitions`, `flags`, `link`, `link_dirs`, `copy_files`, `pch`, `assets`, `commands`, and `exports.*` variants
+**Language**
+- **Imports:** `from packages import Boost(1.78), Vulkan(optional=True)`, `from github import` (FetchContent), `from vendor import` (folders with their own CMakeLists.txt), `from env import`, all optionally conditional on an option
+- **Targets:** `@Executable`, `@SharedLibrary`, `@StaticLibrary`, `@HeaderOnly`, with `path`, `source_groups`, `copy_dlls`, `test` and `unity_build` options
+- **Attributes:** `sources` (globs, `**`), `includes`, `definitions`, `flags`, `link`, `link_dirs`, `copy_files`, `pch`, `assets`, `commands`, and `exports.*` variants
 - **Quality settings:** `warnings = "strict"`, `warnings_as_errors`, `sanitize = ["address"]`, `lto = True`, translated per compiler
+- **Conditionals:** `if`/`elif`/`else` on `platform`, `compiler`, `build_type`, options and optional packages, combined with `and`/`or`/`not`
+- **Reuse:** top-level constants (`warnings = [...]`) and f-strings (`f"{self.name}-{version}"`)
 - **Root-anchored paths:** `"//src/*.cpp"` instead of `"../../src/*.cpp"`
-- **Project settings:** `output_dir`, `presets=True` for CMakePresets.json generation
+- **Installable libraries:** `self.export = "Name"` writes a `find_package()`-able package
+- **Escape hatch:** `cmake("...")` and `self.cmake += [...]` for anything Pyke has no syntax for
+
+**Tooling**
+- **Good errors:** line/column, source snippet and "did you mean" suggestions
+- **Safe regeneration:** rewrites only what changed, refuses to overwrite hand-written files, `--clean` removes stale ones
+- **Warnings after generation:** empty globs, source files no pattern picks up
 - **Stub creation:** missing source files are created as empty stubs automatically
+- **Formatter:** `--fmt` / `--fmt --check`
+- **Project settings:** `output_dir`, `presets=True` for CMakePresets.json generation
 
 ## VS Code Extension
 
-Copy `vscode-extension/` to your extensions directory for syntax highlighting:
+Syntax highlighting only. Copy `vscode-extension/` to your extensions directory:
 
 ```bash
 cp -r vscode-extension ~/.vscode/extensions/pyke.pyke-language-0.1.0
@@ -71,7 +78,15 @@ cp -r vscode-extension ~/.vscode/extensions/pyke.pyke-language-0.1.0
 
 ## Examples
 
-Complete projects (sources included) live in [`examples/projects/`](examples/projects). `tests/run_examples.sh <pyke binary>` generates, builds and tests each one with a real CMake (`PYKE_OFFLINE=1` skips the ones that fetch from GitHub): a conventional `include/src/app/tests` library, a package-using app, a shared plugin, a C project, an installable library with a `find_package` consumer, and an app with GitHub dependencies.
+Complete projects (sources included) live in [`examples/projects/`](examples/projects): a conventional `include/src/app/tests` library, a package-using app, a shared plugin, a C project, an installable library with a `find_package` consumer, and an app with GitHub dependencies.
+
+## Tests
+
+| What | How |
+|---|---|
+| Unit tests (lexer, parser, analyzer, generator, formatter) | `ctest --test-dir build -C Release` |
+| Command-line tests (Linux/macOS) | `tests/run_cli_tests.sh <pyke binary>` (also a ctest entry) |
+| Example projects, built with a real CMake | `tests/run_examples.sh <pyke binary>` or `tests/run_examples.ps1` on Windows; `PYKE_OFFLINE=1` / `-Offline` skips the ones that fetch from GitHub |
 
 Single-file examples:
 

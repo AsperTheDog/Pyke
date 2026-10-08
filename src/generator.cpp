@@ -792,14 +792,31 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
 
             if (l_hasGlob)
             {
-                std::string l_varName = p_target.name + "_SOURCES_" + std::to_string(m_globCounter++);
-                p_out += l_ind + "file(GLOB " + l_varName + " CONFIGURE_DEPENDS\n";
+                // "dir/**/*.cpp" searches subfolders too (GLOB_RECURSE); plain patterns stay in one folder
+                std::vector<std::string> l_flat, l_recursive;
                 for (const ExprPtr& l_elem : l_list->elements)
                 {
-                    p_out += l_ind + "    " + exprToCmake(*l_elem) + "\n";
+                    std::string l_text = exprToCmake(*l_elem);
+                    size_t l_pos = l_text.find("/**/");
+                    if (l_pos != std::string::npos)
+                    {
+                        l_text.replace(l_pos, 4, "/");
+                        l_recursive.push_back(l_text);
+                    }
+                    else l_flat.push_back(l_text);
                 }
-                p_out += l_ind + ")\n";
-                p_out += l_ind + "target_sources(" + p_target.name + " PRIVATE ${" + l_varName + "})\n";
+                std::string l_sources;
+                for (int l_pass = 0; l_pass < 2; ++l_pass)
+                {
+                    const std::vector<std::string>& l_patterns = l_pass == 0 ? l_flat : l_recursive;
+                    if (l_patterns.empty()) continue;
+                    std::string l_varName = p_target.name + "_SOURCES_" + std::to_string(m_globCounter++);
+                    p_out += l_ind + (l_pass == 0 ? "file(GLOB " : "file(GLOB_RECURSE ") + l_varName + " CONFIGURE_DEPENDS\n";
+                    for (const std::string& l_pattern : l_patterns) p_out += l_ind + "    " + l_pattern + "\n";
+                    p_out += l_ind + ")\n";
+                    l_sources += " ${" + l_varName + "}";
+                }
+                p_out += l_ind + "target_sources(" + p_target.name + " PRIVATE" + l_sources + ")\n";
             }
             else
             {
@@ -890,12 +907,13 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
         {
             l_dirs.push_back("\"" + l_str->value + "\"");
         }
-        for (const std::string& l_dir : l_dirs)
+        for (std::string l_dir : l_dirs)
         {
+            if (l_dir.size() >= 2 && l_dir.front() == '"') l_dir = l_dir.substr(1, l_dir.size() - 2); // quote whole paths, not halves
             p_out += l_ind + "add_custom_command(TARGET " + p_target.name + " POST_BUILD\n";
             p_out += l_ind + "    COMMAND ${CMAKE_COMMAND} -E copy_directory\n";
-            p_out += l_ind + "        ${CMAKE_CURRENT_SOURCE_DIR}/" + l_dir + "\n";
-            p_out += l_ind + "        $<TARGET_FILE_DIR:" + p_target.name + ">/" + l_dir + "\n";
+            p_out += l_ind + "        \"${CMAKE_CURRENT_SOURCE_DIR}/" + l_dir + "\"\n";
+            p_out += l_ind + "        \"$<TARGET_FILE_DIR:" + p_target.name + ">/" + l_dir + "\"\n";
             p_out += l_ind + ")\n";
         }
         return;

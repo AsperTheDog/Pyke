@@ -1,21 +1,24 @@
-# Pyke Language Design Specification v0.2
+# Pyke Language Reference
 
 ## Overview
 
-Pyke is a configuration language that compiles to CMake. It uses Python-like syntax tailored to build system concepts, making CMake's capabilities intuitive for Python programmers. The compiler is written in C++.
+Pyke is a configuration language that compiles to CMake. It uses Python-like syntax tailored to build system concepts, so a whole project is described in one `.pyke` file. The compiler is written in C++.
+
+**Contents:** [File structure](#file-structure) · [Project](#project-declaration) · [Imports](#imports) · [Options](#options) · [Targets](#targets) · [Variables](#variables-constants) · [f-strings](#f-strings) · [Conditions](#conditions) · [Raw CMake](#raw-cmake) · [Command line](#command-line) · [Diagnostics and validation](#diagnostics)
 
 ---
 
 ## File Structure
 
-A `.pyke` file has four sections, in this order:
+A `.pyke` file is made of these parts, usually in this order (constants and `cmake(...)` lines may appear anywhere before they are used):
 
 ```python
-# 1. Imports (external packages and environment variables)
+# 1. Imports: system packages, environment variables, GitHub and vendored projects
 from packages import Boost, fmt, Threads
 from env import VULKAN_SDK
+from github import "gabime/spdlog" as spdlog, tag="v1.14.1"
 
-# 2. Project declaration
+# 2. Project declaration (required)
 project("Name", version="1.0.0", lang="c++20")
 
 # 3. Options (user-configurable values)
@@ -37,9 +40,11 @@ target MyApp(PRIVATE Lib1):
 project("GameEngine", version="0.1.0", lang="c++20")
 ```
 
-- `name` (positional): Project name string
-- `version` (keyword): Semantic version string
+- `name` (positional): project name string
+- `version` (keyword): version string of numbers separated by dots
 - `lang` (keyword): Language standard: C++ (`"c++11"` … `"c++26"`), C (`"c90"`, `"c99"`, `"c11"`, `"c17"`, `"c23"`), or a list for a mixed project, e.g. `lang=["c11", "c++17"]`. A C-only project enables only the C language, and `compiler == ...` conditions then test the C compiler.
+- `output_dir` (keyword, optional): folder inside the build directory that receives built executables and libraries
+- `presets` (keyword, optional): `presets=True` also writes a `CMakePresets.json`
 - The root file also sets `CMAKE_BUILD_TYPE` to `Release` when none is given (single-config generators) and turns on `compile_commands.json`.
 
 ---
@@ -58,6 +63,8 @@ from packages import Boost, fmt, OpenGL, Threads
 - Sub-components are accessed with dot notation: `Boost.Filesystem`, `Boost.System`
   - These map to CMake's `Boost::filesystem`, `Boost::system` etc.
 - Imported packages can be used in target dependency lists and inside `configure()` via `self.link`
+
+#### Versions, optional and config packages
 
 A package can carry settings in parentheses:
 
@@ -82,6 +89,8 @@ Settings combine: `Qt6(6.5, config=True)`. An optional package is a condition in
 ```
 
 Do not list an optional package in the target's dependency parentheses; link it inside the `if`.
+
+Together with `if <option>` (see [conditional imports](#conditional-imports)) a whole import can depend on an option.
 
 ### Environment Variable Imports
 
@@ -121,11 +130,14 @@ target my_tests(PRIVATE GTest.gtest_main, PRIVATE fmt):
 
 Option values are bools (`ON`/`OFF`), numbers or strings.
 
-An import can be conditional on a bool option, like package imports. The dependency is only fetched when the option is on, so link it inside `if use_fmt:` rather than in the target's parentheses (pyke warns when you don't):
+#### Conditional imports
+
+Any `packages` or `github` import can end with `if <bool option>`. The dependency is only fetched when the option is on, so link it inside `if use_fmt:` rather than in the target's parentheses (pyke warns when you don't):
 
 ```python
 option use_fmt: bool = True
 from github import "fmtlib/fmt" as fmt, tag="10.2.1" if use_fmt
+from packages import Boost if use_boost
 ```
 
 ### Vendored Dependencies
@@ -194,8 +206,9 @@ The decorator accepts optional arguments for path and IDE settings:
 |---|---|---|---|
 | path (positional or named) | string | target name | Output directory for CMakeLists.txt |
 | source_groups | bool | True | Generate `source_group(TREE ...)` for IDE folder structure |
-| copy_dlls | bool | True for Executable, False otherwise | Copy runtime DLLs to exe output dir (POST_BUILD) |
+| copy_dlls | bool | True for Executable, False otherwise | Copy runtime DLLs next to the executable after the build (Windows only) |
 | test | bool | False | Register as CTest test (`enable_testing()` + `add_test()`) |
+| unity_build | bool | False | Enable CMake unity (jumbo) builds for the target |
 
 ### Target Path (Output Location)
 
@@ -252,9 +265,7 @@ target Renderer(PRIVATE Core, PUBLIC Boost.System):
             self.definitions["RENDERER_WIN32"] = True
 
         if compiler == "msvc":
-            self.flags += ["/W4"]
-        else:
-            self.flags += ["-Wall", "-Wextra"]
+            self.flags += ["/permissive-"]
 
         if build_type == "debug":
             self.definitions["DEBUG"] = True
@@ -262,9 +273,11 @@ target Renderer(PRIVATE Core, PUBLIC Boost.System):
 
 **All paths (sources, includes) are relative to the target's directory.**
 
-#### Paths relative to the project root
+#### Globs and paths relative to the project root
 
-Sources and includes are relative to the target's own folder, which can mean `../` chains. Start a path with `//` to anchor it at the project root instead:
+`sources` accepts globs: `*` and `?` match within one folder, and `**` searches subfolders (`"src/**/*.cpp"` becomes `file(GLOB_RECURSE ...)`). Globs use `CONFIGURE_DEPENDS`, so new files are picked up on the next build.
+
+Paths are relative to the target's own folder, which can mean `../` chains. Start a path with `//` to anchor it at the project root instead:
 
 ```python
 @StaticLibrary("libs/core")
@@ -280,13 +293,16 @@ target core():
 
 | Attribute | Type | CMake Mapping |
 |---|---|---|
-| `self.sources` | list[str] | Source files, globs allowed |
+| `self.sources` | list[str] | Source files, globs allowed (`*`, `?`, `**`) |
 | `self.includes` | list[str] | `target_include_directories(... PRIVATE)` |
 | `self.definitions` | dict[str, value] | `target_compile_definitions(... PRIVATE)` |
 | `self.flags` | list[str] | `target_compile_options(... PRIVATE)` |
 | `self.link` | list[target] | `target_link_libraries(... PRIVATE)` - additional runtime deps |
 | `self.link_dirs` | list[str] | `target_link_directories(... PRIVATE)` |
 | `self.copy_files` | list[str] | `POST_BUILD copy_if_different` to exe output dir |
+| `self.assets` | list[str] | `POST_BUILD copy_directory` of folders (relative to the target) next to the binary |
+| `self.pch` | list[str] | `target_precompile_headers(... PRIVATE)` |
+| `self.commands` | list[tuple] | `add_custom_command`: `("command", [outputs], [depends])`; the outputs are added to the target's sources |
 | `self.output_name` | str | `OUTPUT_NAME` (file name without prefix/extension) |
 | `self.version` / `self.soversion` | str | `VERSION` / `SOVERSION` (shared libraries) |
 | `self.features` | list[str] | `target_compile_features(... PRIVATE)`, e.g. `["cxx_std_17"]` |
@@ -404,10 +420,7 @@ target Renderer(PRIVATE Core, PUBLIC Boost.System):
         if platform == "windows":
             self.definitions["RENDERER_WIN32"] = True
 
-        if compiler == "msvc":
-            self.flags += ["/W4"]
-        else:
-            self.flags += ["-Wall", "-Wextra"]
+        self.warnings = "strict"
 
     def install(self):
         self.library = "lib"
@@ -417,11 +430,8 @@ target Renderer(PRIVATE Core, PUBLIC Boost.System):
 target Game(PRIVATE Core, PRIVATE Renderer, PRIVATE fmt, PRIVATE Threads):
     def configure(self):
         self.sources = ["src/*.cpp"]
-
-        if compiler == "msvc":
-            self.flags += ["/W4", "/WX"]
-        else:
-            self.flags += ["-Wall", "-Wextra", "-Werror"]
+        self.warnings = "strict"
+        self.warnings_as_errors = True
 
         if build_type == "debug":
             self.definitions["DEBUG"] = True
@@ -435,6 +445,7 @@ Core/CMakeLists.txt               # Core shared library target
 libs/renderer/CMakeLists.txt      # Renderer shared library target
 Game/CMakeLists.txt               # Game executable target
 ```
+
 ---
 
 ## Variables (constants)
@@ -536,13 +547,25 @@ Pyke also checks the files after generating them (warnings, never errors):
 
 ---
 
-## Formatting
+## Command line
+
+```
+pyke <input.pyke> [output_dir]    generate CMake files (default output: current directory)
+pyke --clean|--force ...          modifiers for generation, see Regenerating
+pyke --validate <input.pyke>      check without generating
+pyke --init [directory]           scaffold a .pyke from an existing source tree
+pyke --fmt [--check] <files>...   format
+pyke build|test [input.pyke]      generate, configure, build (and run tests)
+pyke --upgrade <input.pyke>       list GitHub dependencies and their tags
+```
+
+### Formatting
 
 `pyke --fmt a.pyke b.pyke` rewrites files in canonical form: 4-space indentation, one space after commas and around `=`, `+=`, `==`, `!=`, `kwarg=value` without spaces, no padding inside brackets, at most one blank line in a row, LF line endings. Comments and strings are never touched. If formatting would change a file's tokens it is left alone and an error is printed.
 
 `pyke --fmt --check a.pyke` changes nothing and exits with status 1 when a file is not formatted, for CI.
 
-## Building
+### Building
 
 ```bash
 pyke build                 # the only .pyke file here: generate, configure, build (Release) in ./build
@@ -553,9 +576,7 @@ pyke test                  # build, then run ctest
 
 `pyke build` and `pyke test` generate next to the `.pyke` file, configure in `build/` (using Ninja when installed), then run `cmake --build` and, for `test`, `ctest --output-on-failure`. They need `cmake` on PATH.
 
----
-
-## Regenerating
+### Regenerating
 
 - Generated CMake files start with `# Generated by pyke from <file> - do not edit`.
 - Pyke refuses to overwrite a file it didn't generate (for example a hand-written `CMakeLists.txt`): nothing is written and the files in the way are listed. Move them, pick another output directory, or pass `--force`.
@@ -576,10 +597,10 @@ pyke test                  # build, then run ctest
 - Unknown variables or invalid values in conditions (`platform == "beos"`)
 - Option type/default mismatches and duplicate options
 - Dependency cycles, including ones created through `self.link` (reported once, with the full chain)
-
+- Bad package versions, unknown warning levels or sanitizers, unknown options in conditional imports, and `vendor` folders outside the project
 
 **Generated-output guarantees**
 - `source_group` works for sources outside the target directory (grouped under "External Sources")
-- `copy_dlls` is only emitted on Windows, so Linux/macOS builds don't break
+- `copy_dlls` and its DLL list are only emitted on Windows and never fail when there are no DLLs to copy
 - `build_type` maps to CMake's real config names (`RelWithDebInfo`, `MinSizeRel`) and `compiler == "clang"` also matches AppleClang
 - String literals are escaped; nothing is ever written outside the output directory
