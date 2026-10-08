@@ -516,6 +516,111 @@ void test_parse_error_missing_configure()
     ASSERT_TRUE(parseHasErrors(l_source), "Should have errors — no def configure");
 }
 
+static std::vector<std::string> parseErrors(const std::string& p_source)
+{
+    pyke::Lexer l_lexer(p_source);
+    std::vector<pyke::Token> l_tokens = l_lexer.tokenize();
+    pyke::Parser l_parser(l_tokens);
+    l_parser.parse();
+    return l_parser.errors();
+}
+
+static bool errorsContain(const std::string& p_source, const std::string& p_needle)
+{
+    for (const std::string& l_e : parseErrors(p_source))
+    {
+        if (l_e.find(p_needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+static const std::string s_tgt = "@Executable\ntarget app():\n    def configure(self):\n";
+
+void test_parse_variable_reassign_error()
+{
+    ASSERT_TRUE(errorsContain("x = [\"a\"]\nx = [\"b\"]\n", "already defined"), "Variables are constants");
+}
+
+void test_parse_variable_shadow_errors()
+{
+    ASSERT_TRUE(errorsContain("platform = 1\n", "builtin"), "Builtin shadow");
+    ASSERT_TRUE(errorsContain("option x: bool = True\nx = 1\n", "already used"), "Option shadow");
+    ASSERT_TRUE(errorsContain("x = 1\nfrom packages import x\n", "already a variable"), "Package after variable");
+}
+
+void test_parse_fstring_errors()
+{
+    ASSERT_TRUE(errorsContain(s_tgt + "        self.flags = [f\"{nope}\"]\n", "unknown name 'nope'"), "Unknown f-string name");
+    ASSERT_TRUE(errorsContain(s_tgt + "        self.flags = [f\"{oops\"]\n", "unclosed '{'"), "Unclosed brace");
+    ASSERT_TRUE(errorsContain(s_tgt + "        self.flags = [f\"a}b\"]\n", "single '}'"), "Stray close brace");
+    ASSERT_TRUE(errorsContain("cmake(f\"{self.name}\")\n", "only be used inside a target"), "self.name at top level");
+    ASSERT_TRUE(errorsContain("v = 1\n" + s_tgt + "        self.flags = [f\"{vv}\"]\n", "did you mean 'v'"), "Suggestion");
+}
+
+void test_parse_fstring_suggests_declare_before_use()
+{
+    ASSERT_TRUE(errorsContain(s_tgt + "        self.flags = [f\"{later}\"]\nlater = 1\n", "unknown name 'later'"), "Use before declaration");
+}
+
+void test_parse_semantic_errors_are_not_syntax_errors()
+{
+    pyke::Lexer l_lexer("x = 1\nx = 2\n");
+    std::vector<pyke::Token> l_tokens = l_lexer.tokenize();
+    pyke::Parser l_parser(l_tokens);
+    l_parser.parse();
+    ASSERT_TRUE(l_parser.hasErrors(), "Has errors");
+    ASSERT_FALSE(l_parser.hasSyntaxErrors(), "But the AST is intact, so analysis may continue");
+}
+
+void test_parse_boolean_condition_shape()
+{
+    pyke::Program l_prog = parseSource(s_tgt + "        if a and b or not c:\n            self.flags += [\"-x\"]\n");
+    auto* l_if = std::get_if<pyke::IfStatement>(&l_prog.targets[0].methods[0].body[0]->value);
+    ASSERT_TRUE(l_if != nullptr, "if statement");
+    auto* l_or = std::get_if<pyke::BoolOp>(&l_if->branches[0].condition->value);
+    ASSERT_TRUE(l_or && l_or->op == "or", "'or' is the root (lowest precedence)");
+    auto* l_and = std::get_if<pyke::BoolOp>(&l_or->left->value);
+    ASSERT_TRUE(l_and && l_and->op == "and", "'and' binds tighter");
+    ASSERT_TRUE(std::holds_alternative<pyke::NotExpr>(l_or->right->value), "'not' on the right");
+}
+
+void test_parse_condition_parens()
+{
+    pyke::Program l_prog = parseSource(s_tgt + "        if a and (b or c):\n            self.flags += [\"-x\"]\n");
+    auto* l_if = std::get_if<pyke::IfStatement>(&l_prog.targets[0].methods[0].body[0]->value);
+    auto* l_and = std::get_if<pyke::BoolOp>(&l_if->branches[0].condition->value);
+    ASSERT_TRUE(l_and && l_and->op == "and", "Parens regroup so 'and' is the root");
+}
+
+void test_parse_condition_unclosed_paren()
+{
+    ASSERT_TRUE(parseHasErrors(s_tgt + "        if (a and b:\n            self.flags += [\"-x\"]\n"), "Unclosed paren");
+}
+
+void test_parse_list_concat_folds()
+{
+    pyke::Program l_prog = parseSource("w = [\"-a\"]\n" + s_tgt + "        self.flags += w + [\"-b\", \"-c\"]\n");
+    auto* l_aug = std::get_if<pyke::AugAssignStatement>(&l_prog.targets[0].methods[0].body[0]->value);
+    ASSERT_TRUE(l_aug != nullptr, "aug assign");
+    auto* l_list = std::get_if<pyke::ListLiteral>(&l_aug->value->value);
+    ASSERT_TRUE(l_list != nullptr, "Concatenated lists fold into one list");
+    ASSERT_EQ(l_list->elements.size(), size_t(3), "Three elements");
+}
+
+void test_parse_raw_cmake_top_level()
+{
+    pyke::Program l_prog = parseSource("cmake(\"set(A 1)\", \"set(B 2)\")\n");
+    ASSERT_EQ(l_prog.rawCmake.size(), size_t(2), "Two raw lines");
+    ASSERT_TRUE(parseHasErrors("cmake(5)\n"), "cmake() needs strings");
+    ASSERT_TRUE(parseHasErrors("cmake()\n"), "cmake() needs content");
+}
+
+void test_parse_variable_does_not_replace_dependency_names()
+{
+    pyke::Program l_prog = parseSource("from packages import fmt\n@Executable\ntarget app(PRIVATE fmt):\n    def configure(self):\n        self.link += [fmt]\n");
+    ASSERT_EQ(l_prog.targets[0].dependencies[0].name, std::string("fmt"), "Dependency kept");
+}
+
 int main()
 {
     std::cout << "=== Pyke Parser Tests ===" << std::endl;
@@ -543,6 +648,17 @@ int main()
     RUN_TEST(test_parse_all_target_types);
     RUN_TEST(test_parse_full_example);
     RUN_TEST(test_parse_error_missing_configure);
+    RUN_TEST(test_parse_variable_reassign_error);
+    RUN_TEST(test_parse_variable_shadow_errors);
+    RUN_TEST(test_parse_fstring_errors);
+    RUN_TEST(test_parse_fstring_suggests_declare_before_use);
+    RUN_TEST(test_parse_semantic_errors_are_not_syntax_errors);
+    RUN_TEST(test_parse_boolean_condition_shape);
+    RUN_TEST(test_parse_condition_parens);
+    RUN_TEST(test_parse_condition_unclosed_paren);
+    RUN_TEST(test_parse_list_concat_folds);
+    RUN_TEST(test_parse_raw_cmake_top_level);
+    RUN_TEST(test_parse_variable_does_not_replace_dependency_names);
 
     std::cout << std::endl;
     std::cout << "Results: " << s_testsPassed << "/" << s_testsRun << " passed";

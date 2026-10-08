@@ -35,7 +35,8 @@ cmake --build . --config Release
 ## Usage
 
 ```bash
-pyke my_project.pyke output_dir/    # generate CMake files
+pyke my_project.pyke output_dir/    # generate CMake files (only rewrites what changed)
+pyke --clean my_project.pyke out/   # also delete files from removed targets
 pyke --init my_project/             # scaffold .pyke from existing directory
 pyke --validate my_project.pyke     # check without generating
 pyke --fmt my_project.pyke          # format
@@ -47,7 +48,10 @@ pyke --upgrade my_project.pyke      # list FetchContent deps and their tags
 - **Imports:** `from packages import`, `from github import` (FetchContent), `from env import`, conditional imports
 - **Target types:** `@Executable`, `@SharedLibrary`, `@StaticLibrary`, `@HeaderOnly`
 - **Decorator options:** `path`, `source_groups`, `copy_dlls`, `test`, `unity_build`
-- **Conditionals:** `if`/`elif`/`else` on `platform`, `compiler`, `build_type`, and user options
+- **Conditionals:** `if`/`elif`/`else` on `platform`, `compiler`, `build_type`, and user options, combined with `and`/`or`/`not`
+- **Reuse:** top-level constants (`warnings = [...]`) and f-strings (`f"{self.name}-{version}"`)
+- **Escape hatch:** `cmake("...")` and `self.cmake += [...]` for anything Pyke has no syntax for
+- **Good errors:** line/column, source snippet and "did you mean" suggestions
 - **Attributes:** `sources`, `includes`, `definitions`, `flags`, `link`, `link_dirs`, `copy_files`, `pch`, `assets`, `commands`, and `exports.*` variants
 - **Project settings:** `output_dir`, `presets=True` for CMakePresets.json generation
 - **Stub creation:** missing source files are created as empty stubs automatically
@@ -69,6 +73,7 @@ cp -r vscode-extension ~/.vscode/extensions/pyke.pyke-language-0.1.0
 | [`library_with_tests.pyke`](examples/library_with_tests.pyke) | Library + CTest |
 | [`game_engine.pyke`](examples/game_engine.pyke) | Multi-target with conditionals |
 | [`vulkan_app.pyke`](examples/vulkan_app.pyke) | Vulkan SDK, env vars, DLL copying |
+| [`variables_and_reuse.pyke`](examples/variables_and_reuse.pyke) | Constants, f-strings, `and`/`or`/`not`, raw CMake |
 | [`full_showcase.pyke`](examples/full_showcase.pyke) | Everything at once |
 
 Full language reference in [`LANGUAGE_SPEC.md`](LANGUAGE_SPEC.md).

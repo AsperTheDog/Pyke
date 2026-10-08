@@ -1,4 +1,6 @@
 #include "parser.hpp"
+#include "suggest.hpp"
+#include <cctype>
 #include <sstream>
 
 namespace pyke
@@ -68,6 +70,14 @@ Program Parser::parse()
                     error("Expected 'target' after decorator");
                 }
             }
+        }
+        else if (check(TokenType::IDENTIFIER) && peekAt(1).type == TokenType::EQUALS)
+        {
+            parseVariable();
+        }
+        else if (check(TokenType::IDENTIFIER) && peek().value == "cmake" && peekAt(1).type == TokenType::LEFT_PAREN)
+        {
+            parseRawCmake(l_program);
         }
         else if (check(TokenType::NEWLINE))
         {
@@ -155,6 +165,7 @@ void Parser::error(const std::string& p_message)
     if (m_hasLastError && m_lastErrorPos == m_pos) return;
     m_hasLastError = true;
     m_lastErrorPos = m_pos;
+    m_syntaxErrors++;
 
     if (p_message.rfind("Line ", 0) == 0)
     {
@@ -163,6 +174,26 @@ void Parser::error(const std::string& p_message)
     }
     const Token& l_tok = peek();
     m_errors.push_back("Line " + std::to_string(l_tok.line) + ":" + std::to_string(l_tok.column) + ": " + p_message);
+}
+
+void Parser::errorAt(int p_line, int p_column, const std::string& p_message)
+{
+    m_errors.push_back("Line " + std::to_string(p_line) + ":" + std::to_string(p_column) + ": " + p_message);
+}
+
+const Token& Parser::peekAt(size_t p_offset) const
+{
+    size_t l_idx = m_pos + p_offset;
+    return l_idx < m_tokens.size() ? m_tokens[l_idx] : m_tokens.back();
+}
+
+void Parser::claimName(const std::string& p_name, int p_line)
+{
+    if (m_variables.count(p_name))
+    {
+        errorAt(p_line, peek().column, "'" + p_name + "' is already a variable; names must be unique");
+    }
+    m_declaredNames.insert(p_name);
 }
 
 void Parser::synchronize()
@@ -198,6 +229,7 @@ ImportDecl Parser::parseImport()
         if (check(TokenType::IDENTIFIER))
         {
             l_decl.packages.push_back(peek().value);
+            claimName(peek().value, peek().line);
             advance();
         }
         else
@@ -238,6 +270,7 @@ EnvImport Parser::parseEnvImport()
         {
             l_decl.variables.push_back(peek().value);
             m_envVariables.insert(peek().value);
+            claimName(peek().value, peek().line);
             advance();
         }
         else
@@ -273,6 +306,7 @@ FetchDecl Parser::parseFetch()
     if (check(TokenType::IDENTIFIER))
     {
         l_decl.name = peek().value;
+        claimName(l_decl.name, peek().line);
         advance();
     }
     else
@@ -359,6 +393,8 @@ OptionDecl Parser::parseOption()
     if (check(TokenType::IDENTIFIER))
     {
         l_decl.name = peek().value;
+        claimName(l_decl.name, peek().line);
+        m_optionNames.insert(l_decl.name);
         advance();
     }
     else
@@ -484,6 +520,9 @@ TargetDecl Parser::parseTarget(TargetType p_type, const std::string& p_path)
     if (check(TokenType::IDENTIFIER))
     {
         l_decl.name = peek().value;
+        l_decl.column = peek().column;
+        claimName(l_decl.name, peek().line);
+        m_currentTarget = l_decl.name;
         advance();
     }
     else
@@ -520,6 +559,7 @@ TargetDecl Parser::parseTarget(TargetType p_type, const std::string& p_path)
     {
     }
 
+    m_currentTarget.clear();
     return l_decl;
 }
 
@@ -546,6 +586,8 @@ std::vector<Dependency> Parser::parseDependencies()
         if (check(TokenType::IDENTIFIER))
         {
             l_dep.name = peek().value;
+            l_dep.line = peek().line;
+            l_dep.column = peek().column;
             advance();
 
             while (match(TokenType::DOT))
@@ -658,7 +700,7 @@ StmtPtr Parser::parseIfStatement()
     IfStatement l_ifStmt;
 
     expect(TokenType::IF, "Expected 'if'");
-    ExprPtr l_condition = parseExpression();
+    ExprPtr l_condition = parseCondition();
     expect(TokenType::COLON, "Expected ':' after if condition");
     skipNewlines();
     expect(TokenType::INDENT, "Expected indented block after if");
@@ -680,7 +722,7 @@ StmtPtr Parser::parseIfStatement()
     while (check(TokenType::ELIF))
     {
         advance();
-        ExprPtr l_elifCond = parseExpression();
+        ExprPtr l_elifCond = parseCondition();
         expect(TokenType::COLON, "Expected ':' after elif condition");
         skipNewlines();
         expect(TokenType::INDENT, "Expected indented block after elif");
@@ -724,6 +766,232 @@ StmtPtr Parser::parseIfStatement()
     return makeStmt(l_line, l_col, std::move(l_ifStmt));
 }
 
+// ---- conditions: `or` < `and` < `not` < comparison / bool option / ( group ) ----
+
+ExprPtr Parser::parseCondition()
+{
+    return parseOrCondition();
+}
+
+ExprPtr Parser::parseOrCondition()
+{
+    ExprPtr l_left = parseAndCondition();
+    while (check(TokenType::OR))
+    {
+        int l_line = peek().line;
+        int l_col = peek().column;
+        advance();
+        ExprPtr l_right = parseAndCondition();
+        l_left = makeExpr(l_line, l_col, BoolOp{"or", std::move(l_left), std::move(l_right)});
+    }
+    return l_left;
+}
+
+ExprPtr Parser::parseAndCondition()
+{
+    ExprPtr l_left = parseNotCondition();
+    while (check(TokenType::AND))
+    {
+        int l_line = peek().line;
+        int l_col = peek().column;
+        advance();
+        ExprPtr l_right = parseNotCondition();
+        l_left = makeExpr(l_line, l_col, BoolOp{"and", std::move(l_left), std::move(l_right)});
+    }
+    return l_left;
+}
+
+ExprPtr Parser::parseNotCondition()
+{
+    int l_line = peek().line;
+    int l_col = peek().column;
+
+    if (match(TokenType::NOT))
+    {
+        ExprPtr l_operand = parseNotCondition();
+        return makeExpr(l_line, l_col, NotExpr{std::move(l_operand)});
+    }
+    if (match(TokenType::LEFT_PAREN))
+    {
+        ExprPtr l_inner = parseOrCondition();
+        expect(TokenType::RIGHT_PAREN, "Expected ')' to close the grouped condition");
+        return l_inner;
+    }
+    return parseExpression();
+}
+
+// ---- top-level variables and cmake() ----
+
+void Parser::parseVariable()
+{
+    const Token l_nameTok = peek();
+    const std::string& l_name = l_nameTok.value;
+    advance();
+    expect(TokenType::EQUALS, "Expected '='");
+
+    ExprPtr l_value = parseExpression();
+
+    if (l_name == "platform" || l_name == "compiler" || l_name == "build_type")
+    {
+        errorAt(l_nameTok.line, l_nameTok.column, "'" + l_name + "' is a builtin and cannot be used as a variable name");
+        return;
+    }
+    if (m_variables.count(l_name))
+    {
+        errorAt(l_nameTok.line, l_nameTok.column, "variable '" + l_name + "' is already defined (variables are constants; use a new name)");
+        return;
+    }
+    if (m_declaredNames.count(l_name) || m_envVariables.count(l_name))
+    {
+        errorAt(l_nameTok.line, l_nameTok.column, "'" + l_name + "' is already used by a package, option, github import or target");
+        return;
+    }
+    m_variables.emplace(l_name, std::move(l_value));
+}
+
+void Parser::parseRawCmake(Program& p_program)
+{
+    advance(); // cmake
+    expect(TokenType::LEFT_PAREN, "Expected '(' after 'cmake'");
+    skipCollectionWhitespace();
+
+    bool l_any = false;
+    while (!check(TokenType::RIGHT_PAREN) && !atEnd())
+    {
+        int l_line = peek().line;
+        int l_col = peek().column;
+        ExprPtr l_arg = parseExpression();
+        if (auto* l_str = std::get_if<StringLiteral>(&l_arg->value))
+        {
+            p_program.rawCmake.push_back({l_str->value, l_line});
+            l_any = true;
+        }
+        else
+        {
+            errorAt(l_line, l_col, "cmake() expects string arguments");
+        }
+        skipCollectionWhitespace();
+        if (!match(TokenType::COMMA)) break;
+        skipCollectionWhitespace();
+    }
+    if (!l_any) error("cmake() needs at least one string");
+    expect(TokenType::RIGHT_PAREN, "Expected ')' after cmake(...)");
+}
+
+// ---- f-strings: resolved here, so later stages only ever see plain string literals ----
+
+bool Parser::stringifyForFString(const Expression& p_value, std::string& p_out) const
+{
+    if (auto* l_s = std::get_if<StringLiteral>(&p_value.value)) { p_out = l_s->value; return true; }
+    if (auto* l_i = std::get_if<IntLiteral>(&p_value.value)) { p_out = std::to_string(l_i->value); return true; }
+    if (auto* l_b = std::get_if<BoolLiteral>(&p_value.value)) { p_out = l_b->value ? "ON" : "OFF"; return true; }
+    if (auto* l_e = std::get_if<EnvVariable>(&p_value.value)) { p_out = "$ENV{" + l_e->name + "}"; return true; }
+    if (auto* l_id = std::get_if<Identifier>(&p_value.value)) { p_out = l_id->name; return true; }
+    if (auto* l_list = std::get_if<ListLiteral>(&p_value.value))
+    {
+        p_out.clear();
+        for (const ExprPtr& l_elem : l_list->elements)
+        {
+            std::string l_part;
+            if (!stringifyForFString(*l_elem, l_part)) return false;
+            if (!p_out.empty()) p_out += " ";
+            p_out += l_part;
+        }
+        return true;
+    }
+    return false;
+}
+
+ExprPtr Parser::resolveFString(const Token& p_token)
+{
+    const std::string& l_src = p_token.value;
+    std::string l_out;
+    const int l_baseCol = p_token.column + 2; // skip f"
+
+    auto l_fail = [&](size_t p_at, const std::string& p_msg)
+    {
+        errorAt(p_token.line, l_baseCol + static_cast<int>(p_at), p_msg);
+    };
+
+    for (size_t l_i = 0; l_i < l_src.size(); l_i++)
+    {
+        char l_c = l_src[l_i];
+
+        // ${VAR}, $ENV{VAR}, $CACHE{VAR}: CMake syntax, never interpolation
+        if (l_c == '$')
+        {
+            size_t l_j = l_i + 1;
+            while (l_j < l_src.size() && (std::isalpha(static_cast<unsigned char>(l_src[l_j])) || l_src[l_j] == '_')) l_j++;
+            if (l_j < l_src.size() && l_src[l_j] == '{')
+            {
+                size_t l_close = l_src.find('}', l_j);
+                if (l_close == std::string::npos) { l_fail(l_i, "unclosed '{' after '$'"); return makeExpr(p_token.line, p_token.column, StringLiteral{l_out}); }
+                l_out += l_src.substr(l_i, l_close - l_i + 1);
+                l_i = l_close;
+                continue;
+            }
+            l_out += l_c;
+            continue;
+        }
+
+        if (l_c == '{')
+        {
+            if (l_i + 1 < l_src.size() && l_src[l_i + 1] == '{') { l_out += '{'; l_i++; continue; }
+
+            size_t l_close = l_src.find('}', l_i);
+            if (l_close == std::string::npos) { l_fail(l_i, "unclosed '{' in f-string (write '{{' for a literal brace)"); break; }
+
+            std::string l_name = l_src.substr(l_i + 1, l_close - l_i - 1);
+            size_t l_a = l_name.find_first_not_of(' ');
+            size_t l_b = l_name.find_last_not_of(' ');
+            l_name = (l_a == std::string::npos) ? "" : l_name.substr(l_a, l_b - l_a + 1);
+            size_t l_at = l_i + 1;
+
+            if (l_name.empty()) { l_fail(l_at, "empty '{}' in f-string"); }
+            else if (l_name == "self.name")
+            {
+                if (m_currentTarget.empty()) l_fail(l_at, "{self.name} can only be used inside a target");
+                else l_out += m_currentTarget;
+            }
+            else if (m_variables.count(l_name))
+            {
+                std::string l_text;
+                if (stringifyForFString(*m_variables.at(l_name), l_text)) l_out += l_text;
+                else l_fail(l_at, "variable '" + l_name + "' cannot be used in a string (only strings, numbers, bools and lists of them)");
+            }
+            else if (m_optionNames.count(l_name)) l_out += "${" + l_name + "}";
+            else if (m_envVariables.count(l_name)) l_out += "$ENV{" + l_name + "}";
+            else if (l_name == "platform" || l_name == "compiler" || l_name == "build_type")
+            {
+                l_fail(l_at, "builtin '" + l_name + "' can only be used in conditions");
+            }
+            else
+            {
+                std::vector<std::string> l_candidates = {"self.name"};
+                for (const auto& l_v : m_variables) l_candidates.push_back(l_v.first);
+                for (const std::string& l_o : m_optionNames) l_candidates.push_back(l_o);
+                for (const std::string& l_e : m_envVariables) l_candidates.push_back(l_e);
+                std::string l_hint = didYouMean(l_name, l_candidates);
+                l_fail(l_at, "unknown name '" + l_name + "' in f-string" + (l_hint.empty() ? " (variables and options must be declared before use)" : l_hint));
+            }
+            l_i = l_close;
+            continue;
+        }
+
+        if (l_c == '}')
+        {
+            if (l_i + 1 < l_src.size() && l_src[l_i + 1] == '}') { l_out += '}'; l_i++; continue; }
+            l_fail(l_i, "single '}' in f-string (write '}}' for a literal brace)");
+            continue;
+        }
+
+        l_out += l_c;
+    }
+
+    return makeExpr(p_token.line, p_token.column, StringLiteral{l_out});
+}
+
+
 ExprPtr Parser::parseExpression()
 {
     ExprPtr l_left = parsePrimary();
@@ -737,6 +1005,22 @@ ExprPtr Parser::parseExpression()
 
         ExprPtr l_right = parsePrimary();
         l_right = parsePostfix(std::move(l_right));
+
+        auto* l_leftList = std::get_if<ListLiteral>(&l_left->value);
+        auto* l_rightList = std::get_if<ListLiteral>(&l_right->value);
+        auto* l_leftDict = std::get_if<DictLiteral>(&l_left->value);
+        auto* l_rightDict = std::get_if<DictLiteral>(&l_right->value);
+        if (l_leftList && l_rightList)
+        {
+            // list + list is folded right away so variables compose: base_flags + ["-Werror"]
+            for (ExprPtr& l_e : l_rightList->elements) l_leftList->elements.push_back(std::move(l_e));
+            continue;
+        }
+        if (l_leftDict && l_rightDict)
+        {
+            for (auto& l_entry : l_rightDict->entries) l_leftDict->entries.push_back(std::move(l_entry));
+            continue;
+        }
 
         StringConcat l_concat;
         l_concat.left = std::move(l_left);
@@ -776,6 +1060,13 @@ ExprPtr Parser::parsePrimary()
         return makeExpr(l_line, l_col, StringLiteral{l_val});
     }
 
+    if (check(TokenType::FSTRING_LITERAL))
+    {
+        Token l_tok = peek();
+        advance();
+        return resolveFString(l_tok);
+    }
+
     if (check(TokenType::INT_LITERAL))
     {
         int l_val = std::stoi(peek().value);
@@ -805,6 +1096,14 @@ ExprPtr Parser::parsePrimary()
     {
         std::string l_name = peek().value;
         advance();
+        auto l_var = m_variables.find(l_name);
+        if (l_var != m_variables.end())
+        {
+            ExprPtr l_copy = cloneExpr(*l_var->second);
+            l_copy->line = l_line;
+            l_copy->column = l_col;
+            return l_copy;
+        }
         if (m_envVariables.count(l_name))
         {
             return makeExpr(l_line, l_col, EnvVariable{l_name});

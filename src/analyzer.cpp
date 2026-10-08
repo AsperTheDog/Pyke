@@ -1,4 +1,5 @@
 #include "analyzer.hpp"
+#include "suggest.hpp"
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -19,7 +20,7 @@ const std::map<std::string, std::set<std::string>> s_builtinValues = {
 
 const std::set<std::string> s_configureAttrs = {
     "sources", "includes", "definitions", "flags", "link", "link_dirs",
-    "copy_files", "pch", "assets", "commands",
+    "copy_files", "pch", "assets", "commands", "cmake",
 };
 
 const std::set<std::string> s_exportableAttrs = {
@@ -65,6 +66,7 @@ struct AttrRef
     bool indexed = false;
     std::string name;
     std::string problem;
+    int column = 0; // of the attribute name
 };
 
 AttrRef decodeTarget(const Expression& p_expr)
@@ -81,18 +83,30 @@ AttrRef decodeTarget(const Expression& p_expr)
     auto* l_dot = std::get_if<DotAccess>(&l_cur->value);
     if (!l_dot)
     {
-        l_ref.problem = "assignment target must be 'self.<attribute>'";
+        if (auto* l_id = std::get_if<Identifier>(&l_cur->value))
+        {
+            l_ref.problem = "'" + l_id->name + "' cannot be assigned inside a target; set attributes with 'self." + l_id->name +
+                            "', or declare constants at the top level of the file";
+        }
+        else
+        {
+            l_ref.problem = "assignment target must be 'self.<attribute>'";
+        }
+        l_ref.column = l_cur->column;
         return l_ref;
     }
 
     const Expression* l_owner = l_dot->object.get();
     l_ref.name = l_dot->member;
+    l_ref.column = l_cur->column + 1; // a DotAccess expression is positioned at its '.'
 
     if (auto* l_ownerDot = std::get_if<DotAccess>(&l_owner->value))
     {
         if (l_ownerDot->member != "exports")
         {
-            l_ref.problem = "unknown attribute path '" + l_ownerDot->member + "." + l_dot->member + "'";
+            l_ref.problem = "unknown attribute path '" + l_ownerDot->member + "." + l_dot->member + "'" +
+                            didYouMean(l_ownerDot->member, std::vector<std::string>{"exports"});
+            l_ref.column = l_owner->column + 1;
             return l_ref;
         }
         l_ref.exported = true;
@@ -346,7 +360,10 @@ void Analyzer::validateDependencies()
 
             if (!m_targetNames.count(l_base) && !m_importedPackages.count(l_base))
             {
-                error(where(l_target.line) + "target '" + l_target.name + "': unknown dependency '" + l_dep.name + "' (not a target or imported package)");
+                std::vector<std::string> l_known(m_targetNames.begin(), m_targetNames.end());
+                l_known.insert(l_known.end(), m_importedPackages.begin(), m_importedPackages.end());
+                errorAt(l_dep.line ? l_dep.line : l_target.line, l_dep.column, "target '" + l_target.name + "': unknown dependency '" + l_dep.name +
+                        "'" + didYouMean(l_base, l_known) + " (not a target or imported package)");
                 continue;
             }
             if (!l_seen.insert(l_dep.name).second)
@@ -437,9 +454,11 @@ void Analyzer::validateStatement(const TargetDecl& p_target, const Method& p_met
 
     std::string l_ctx = where(p_stmt.line) + "target '" + p_target.name + "': ";
     AttrRef l_ref = decodeTarget(*l_lhs);
+    int l_line = p_stmt.line;
+    std::string l_who = "target '" + p_target.name + "': ";
     if (!l_ref.valid)
     {
-        error(l_ctx + l_ref.problem);
+        errorAt(l_line, l_ref.column, l_who + l_ref.problem);
         return;
     }
 
@@ -450,18 +469,19 @@ void Analyzer::validateStatement(const TargetDecl& p_target, const Method& p_met
     {
         if (s_installAttrs.count(l_ref.name) || s_configureAttrs.count(l_ref.name))
         {
-            error(l_ctx + "'" + l_ref.name + "' is only valid inside " + (l_inInstall ? "configure()" : "install()"));
+            errorAt(l_line, l_ref.column, l_who + "'" + l_ref.name + "' is only valid inside " + (l_inInstall ? "configure()" : "install()"));
         }
         else
         {
-            error(l_ctx + "unknown attribute '" + l_ref.name + "'");
+            const std::set<std::string>& l_pool = l_ref.exported ? s_exportableAttrs : l_allowed;
+            errorAt(l_line, l_ref.column, l_who + "unknown attribute '" + l_ref.name + "'" + didYouMean(l_ref.name, l_pool));
         }
         return;
     }
 
     if (l_ref.exported && !s_exportableAttrs.count(l_ref.name))
     {
-        error(l_ctx + "'" + l_ref.name + "' cannot be exported (self.exports supports: includes, definitions, flags, link, link_dirs, pch)");
+        errorAt(l_line, l_ref.column, l_who + "'" + l_ref.name + "' cannot be exported (self.exports supports: includes, definitions, flags, link, link_dirs, pch)");
         return;
     }
     if (l_ref.indexed && l_ref.name != "definitions")
@@ -512,6 +532,12 @@ void Analyzer::validateAttributeValue(const TargetDecl& p_target, const std::str
         }
     };
 
+    if (p_attr == "cmake")
+    {
+        l_requireStringList(true);
+        return;
+    }
+
     if (p_attr == "sources" || p_attr == "includes" || p_attr == "flags" || p_attr == "link_dirs" || p_attr == "copy_files")
     {
         l_requireStringList(false);
@@ -554,7 +580,10 @@ void Analyzer::validateAttributeValue(const TargetDecl& p_target, const std::str
             std::string l_base = basePackage(l_name);
             if (!m_targetNames.count(l_base) && !m_importedPackages.count(l_base))
             {
-                error(l_ctx + "unknown link dependency '" + l_name + "' (not a target or imported package)");
+                std::vector<std::string> l_known(m_targetNames.begin(), m_targetNames.end());
+                l_known.insert(l_known.end(), m_importedPackages.begin(), m_importedPackages.end());
+                errorAt(l_elem->line ? l_elem->line : p_line, l_elem->column, "target '" + p_target.name + "': unknown link dependency '" + l_name + "'" +
+                        didYouMean(l_base, l_known) + " (not a target or imported package)");
             }
             else if (l_base == p_target.name)
             {
@@ -626,25 +655,38 @@ void Analyzer::validateAttributeValue(const TargetDecl& p_target, const std::str
 
 void Analyzer::validateCondition(const TargetDecl& p_target, const Expression& p_cond, int p_line)
 {
-    std::string l_ctx = where(p_line) + "target '" + p_target.name + "': ";
+    std::string l_who = "target '" + p_target.name + "': ";
+    auto l_at = [&](const Expression& p_e, const std::string& p_msg) { errorAt(p_e.line ? p_e.line : p_line, p_e.column, l_who + p_msg); };
+
+    if (auto* l_bool = std::get_if<BoolOp>(&p_cond.value))
+    {
+        validateCondition(p_target, *l_bool->left, p_line);
+        validateCondition(p_target, *l_bool->right, p_line);
+        return;
+    }
+    if (auto* l_not = std::get_if<NotExpr>(&p_cond.value))
+    {
+        validateCondition(p_target, *l_not->operand, p_line);
+        return;
+    }
 
     if (auto* l_cmp = std::get_if<Comparison>(&p_cond.value))
     {
         if (l_cmp->op != "==" && l_cmp->op != "!=")
         {
-            error(l_ctx + "unsupported comparison operator '" + l_cmp->op + "'");
+            l_at(p_cond, "unsupported comparison operator '" + l_cmp->op + "'");
             return;
         }
         auto* l_id = std::get_if<Identifier>(&l_cmp->left->value);
         auto* l_str = std::get_if<StringLiteral>(&l_cmp->right->value);
         if (!l_id)
         {
-            error(l_ctx + "left side of a comparison must be platform, compiler, build_type or a str/path option");
+            l_at(*l_cmp->left, "left side of a comparison must be platform, compiler, build_type or a str/path option");
             return;
         }
         if (!l_str)
         {
-            error(l_ctx + "right side of a comparison must be a string literal");
+            l_at(*l_cmp->right, "right side of a comparison must be a string literal");
             return;
         }
 
@@ -655,7 +697,8 @@ void Analyzer::validateCondition(const TargetDecl& p_target, const Expression& p
             {
                 std::string l_valid;
                 for (const std::string& l_v : l_builtin->second) l_valid += (l_valid.empty() ? "" : ", ") + l_v;
-                error(l_ctx + "'" + l_str->value + "' is not a valid value for " + l_id->name + " (expected: " + l_valid + ")");
+                l_at(*l_cmp->right, "'" + l_str->value + "' is not a valid value for " + l_id->name + didYouMean(l_str->value, l_builtin->second) +
+                                    " (expected: " + l_valid + ")");
             }
             return;
         }
@@ -663,11 +706,14 @@ void Analyzer::validateCondition(const TargetDecl& p_target, const Expression& p
         auto l_opt = m_options.find(l_id->name);
         if (l_opt == m_options.end())
         {
-            error(l_ctx + "unknown variable '" + l_id->name + "' in condition (use platform, compiler, build_type or a declared option)");
+            std::vector<std::string> l_known(s_builtinVars.begin(), s_builtinVars.end());
+            for (const auto& l_o : m_options) l_known.push_back(l_o.first);
+            l_at(*l_cmp->left, "unknown variable '" + l_id->name + "' in condition" + didYouMean(l_id->name, l_known) +
+                               " (use platform, compiler, build_type or a declared option)");
         }
         else if (l_opt->second->type == "bool")
         {
-            error(l_ctx + "bool option '" + l_id->name + "' cannot be compared to a string; use 'if " + l_id->name + ":'");
+            l_at(*l_cmp->left, "bool option '" + l_id->name + "' cannot be compared to a string; use 'if " + l_id->name + ":'");
         }
         return;
     }
@@ -677,18 +723,27 @@ void Analyzer::validateCondition(const TargetDecl& p_target, const Expression& p
         auto l_opt = m_options.find(l_id->name);
         if (l_opt == m_options.end())
         {
-            error(l_ctx + "unknown variable '" + l_id->name + "' in condition" + (s_builtinVars.count(l_id->name) ? " (builtin '" + l_id->name + "' must be compared with == or !=)" : ""));
+            if (s_builtinVars.count(l_id->name))
+            {
+                l_at(p_cond, "builtin '" + l_id->name + "' must be compared with == or !=");
+            }
+            else
+            {
+                std::vector<std::string> l_known;
+                for (const auto& l_o : m_options) l_known.push_back(l_o.first);
+                l_at(p_cond, "unknown variable '" + l_id->name + "' in condition" + didYouMean(l_id->name, l_known));
+            }
         }
         else if (l_opt->second->type != "bool")
         {
-            warning(l_ctx + "option '" + l_id->name + "' is not a bool; the condition tests whether it is set");
+            warningAt(p_cond.line ? p_cond.line : p_line, p_cond.column, l_who + "option '" + l_id->name + "' is not a bool; the condition tests whether it is set");
         }
         return;
     }
 
     if (std::holds_alternative<BoolLiteral>(p_cond.value)) return;
 
-    error(l_ctx + "unsupported condition expression");
+    l_at(p_cond, "unsupported condition expression");
 }
 
 void Analyzer::detectCycles()
@@ -825,14 +880,43 @@ std::string Analyzer::where(int p_line) const
     return p_line > 0 ? "Line " + std::to_string(p_line) + ": " : "";
 }
 
+void Analyzer::record(bool p_warning, int p_line, int p_column, const std::string& p_message)
+{
+    m_diagnostics.push_back({p_line, p_column, p_warning, p_message});
+    std::string l_text = p_line > 0 ? "Line " + std::to_string(p_line) + ": " + p_message : p_message;
+    (p_warning ? m_warnings : m_errors).push_back(l_text);
+}
+
+static void splitLinePrefix(const std::string& p_message, int& p_line, std::string& p_rest)
+{
+    p_line = 0;
+    p_rest = p_message;
+    if (p_message.rfind("Line ", 0) != 0) return;
+    size_t l_end = p_message.find(": ");
+    if (l_end == std::string::npos) return;
+    std::string l_num = p_message.substr(5, l_end - 5);
+    if (l_num.empty() || !std::all_of(l_num.begin(), l_num.end(), [](unsigned char p_c) { return std::isdigit(p_c); })) return;
+    p_line = std::stoi(l_num);
+    p_rest = p_message.substr(l_end + 2);
+}
+
 void Analyzer::error(const std::string& p_message)
 {
-    m_errors.push_back(p_message);
+    int l_line;
+    std::string l_rest;
+    splitLinePrefix(p_message, l_line, l_rest);
+    record(false, l_line, 0, l_rest);
 }
 
 void Analyzer::warning(const std::string& p_message)
 {
-    m_warnings.push_back(p_message);
+    int l_line;
+    std::string l_rest;
+    splitLinePrefix(p_message, l_line, l_rest);
+    record(true, l_line, 0, l_rest);
 }
+
+void Analyzer::errorAt(int p_line, int p_column, const std::string& p_message) { record(false, p_line, p_column, p_message); }
+void Analyzer::warningAt(int p_line, int p_column, const std::string& p_message) { record(true, p_line, p_column, p_message); }
 
 } // namespace pyke

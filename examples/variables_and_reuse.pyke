@@ -1,0 +1,35 @@
+# Constants, f-strings, boolean conditions and the cmake() escape hatch
+
+version = "1.4.0"
+warnings = ["-Wall", "-Wextra"]
+base_defs = {"APP_VERSION": f"{version}"}
+
+cmake("set(CMAKE_EXPORT_COMPILE_COMMANDS ON)")
+
+project("Reuse", version="1.4.0", lang="c++20")
+
+option use_lto: bool = False
+option flavor: str = "plain"
+
+@StaticLibrary("libs/core")
+target core():
+    def configure(self):
+        self.sources = ["src/*.cpp"]
+        self.exports.includes = ["include/"]
+        self.flags += warnings
+
+@Executable("app")
+target app(PRIVATE core):
+    def configure(self):
+        self.sources = ["src/main.cpp"]
+        self.flags += warnings + ["-Wshadow"]
+        self.definitions = base_defs + {"FLAVOR": f"{flavor}"}
+
+        if compiler != "msvc" and (use_lto or build_type == "release"):
+            self.flags += ["-flto"]
+
+        # f"..." fills in {names} when Pyke runs; ${...} stays CMake's
+        self.cmake += [
+            f"set_target_properties({self.name} PROPERTIES OUTPUT_NAME app-{version})",
+            f"message(STATUS \"building {self.name} ({flavor}) into ${CMAKE_BINARY_DIR}\")",
+        ]

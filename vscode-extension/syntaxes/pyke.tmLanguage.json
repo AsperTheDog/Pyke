@@ -11,6 +11,7 @@
         { "include": "#builtins" },
         { "include": "#option-types" },
         { "include": "#booleans" },
+        { "include": "#fstrings" },
         { "include": "#strings" },
         { "include": "#numbers" },
         { "include": "#self" },
@@ -40,7 +41,7 @@
             "patterns": [
                 {
                     "name": "keyword.control.pyke",
-                    "match": "\\b(if|elif|else)\\b"
+                    "match": "\\b(if|elif|else|and|or|not)\\b"
                 },
                 {
                     "name": "keyword.other.pyke",
@@ -68,6 +69,15 @@
             "name": "constant.language.boolean.pyke",
             "match": "\\b(True|False)\\b"
         },
+        "fstrings": {
+            "name": "string.quoted.double.fstring.pyke",
+            "begin": "\\bf\"",
+            "end": "\"",
+            "patterns": [
+                { "name": "constant.character.escape.pyke", "match": "\\{\\{|\\}\\}|\\\\[nrt\\\\\"']" },
+                { "name": "meta.embedded.interpolation.pyke", "match": "(?<!\\$)(?<!\\$[A-Za-z_]+)\\{[^}]*\\}" }
+            ]
+        },
         "strings": {
             "name": "string.quoted.double.pyke",
             "begin": "\"",
@@ -91,7 +101,7 @@
             "patterns": [
                 {
                     "name": "keyword.operator.comparison.pyke",
-                    "match": "=="
+                    "match": "==|!="
                 },
                 {
                     "name": "keyword.operator.assignment.augmented.pyke",

@@ -42,6 +42,7 @@ private:
 
     std::string exprToCmake(const Expression& p_expr);
     std::string conditionToCmake(const Expression& p_expr);
+    static std::string rawCmakeBlock(const std::string& p_text, const std::string& p_indent);
     std::string comparisonToCmake(const Comparison& p_cmp);
     static std::string cmakeConfigName(const std::string& p_buildType);
     void emitAssignment(const Expression& p_lhs, const Expression& p_rhs, const TargetDecl& p_target, std::string& p_out, int p_indentLevel);

@@ -791,6 +791,82 @@ void test_gen_static_library_install_uses_archive()
 }
 
 
+static const std::string s_cfg = "@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n";
+
+void test_gen_variables_and_list_concat()
+{
+    std::map<std::string, std::string> l_files = generateFrom("warn = [\"-Wall\"]\n" + s_proj + s_cfg + "        self.flags += warn + [\"-Werror\"]\n");
+    const std::string& l_a = l_files["A/CMakeLists.txt"];
+    ASSERT_CONTAINS(l_a, "\"-Wall\"\n    \"-Werror\"", "Variable list merged with literal list");
+}
+
+void test_gen_dict_variable_merge()
+{
+    std::map<std::string, std::string> l_files = generateFrom("d = {\"A\": 1}\n" + s_proj + s_cfg + "        self.definitions = d + {\"B\": 2}\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "A=1", "First dict entry");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "B=2", "Second dict entry");
+}
+
+void test_gen_fstring_variable_and_self_name()
+{
+    std::map<std::string, std::string> l_files = generateFrom("v = \"2.0\"\n" + s_proj + s_cfg + "        self.includes = [f\"third/{self.name}-{v}\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "\"third/A-2.0\"", "Variable and target name resolved");
+}
+
+void test_gen_fstring_option_becomes_cmake_reference()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj + "option flavor: str = \"x\"\n" + s_cfg + "        self.includes = [f\"inc/{flavor}\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "\"inc/${flavor}\"", "Option resolves at configure time");
+}
+
+void test_gen_fstring_env_and_cmake_syntax_passthrough()
+{
+    std::map<std::string, std::string> l_files = generateFrom("from env import SDK\n" + s_proj + s_cfg +
+        "        self.includes = [f\"{SDK}/inc\", f\"${CMAKE_SOURCE_DIR}/x\", f\"$ENV{HOME}/y\", f\"$<CONFIG>/{{z}}\"]\n");
+    const std::string& l_a = l_files["A/CMakeLists.txt"];
+    ASSERT_CONTAINS(l_a, "\"$ENV{SDK}/inc\"", "Env import");
+    ASSERT_CONTAINS(l_a, "\"${CMAKE_SOURCE_DIR}/x\"", "${} untouched");
+    ASSERT_CONTAINS(l_a, "\"$ENV{HOME}/y\"", "$ENV{} untouched");
+    ASSERT_CONTAINS(l_a, "\"$<CONFIG>/{z}\"", "Genex untouched and {{ unescaped");
+}
+
+void test_gen_fstring_list_variable_joins_with_spaces()
+{
+    std::map<std::string, std::string> l_files = generateFrom("w = [\"-a\", \"-b\"]\n" + s_proj + s_cfg + "        self.cmake += [f\"message(STATUS \\\"{w}\\\")\"]\n");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "message(STATUS \"-a -b\")", "List joins with spaces");
+}
+
+void test_gen_boolean_conditions()
+{
+    std::map<std::string, std::string> l_files = generateFrom(s_proj + "option x: bool = True\noption y: bool = False\n" + s_cfg +
+        "        if x and not y:\n            self.flags += [\"-1\"]\n"
+        "        if x or y:\n            self.flags += [\"-2\"]\n"
+        "        if platform == \"linux\" and (x or y):\n            self.flags += [\"-3\"]\n"
+        "        if (x or y) and not (x and y):\n            self.flags += [\"-4\"]\n");
+    const std::string& l_a = l_files["A/CMakeLists.txt"];
+    ASSERT_CONTAINS(l_a, "if(x AND NOT (y))", "and/not");
+    ASSERT_CONTAINS(l_a, "if(x OR y)", "or");
+    ASSERT_CONTAINS(l_a, "if((UNIX AND NOT APPLE) AND (x OR y))", "Compound platform test is parenthesized");
+    ASSERT_CONTAINS(l_a, "if((x OR y) AND NOT (x AND y))", "Explicit grouping preserved");
+}
+
+void test_gen_raw_cmake_in_target_and_root()
+{
+    std::map<std::string, std::string> l_files = generateFrom("cmake(\"set(ROOT_FLAG ON)\")\n" + s_proj + s_cfg +
+        "        self.cmake += [\"set_target_properties(A PROPERTIES FOLDER x)\"]\n"
+        "        if platform == \"windows\":\n            self.cmake += [\"message(STATUS win)\"]\n");
+    ASSERT_CONTAINS(l_files["CMakeLists.txt"], "set(ROOT_FLAG ON)", "Root raw cmake");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "set_target_properties(A PROPERTIES FOLDER x)", "Target raw cmake verbatim");
+    ASSERT_CONTAINS(l_files["A/CMakeLists.txt"], "if(WIN32)\n    message(STATUS win)", "Raw cmake respects conditions");
+}
+
+void test_gen_root_raw_cmake_before_subdirectories()
+{
+    std::map<std::string, std::string> l_files = generateFrom("cmake(\"set(ROOT_FLAG ON)\")\n" + s_proj + s_cfg);
+    const std::string& l_root = l_files["CMakeLists.txt"];
+    ASSERT_TRUE(l_root.find("set(ROOT_FLAG ON)") < l_root.find("add_subdirectory(A)"), "Raw cmake precedes add_subdirectory");
+}
+
 int main()
 {
     std::cout << "=== Pyke Generator Tests ===" << std::endl;
@@ -835,6 +911,15 @@ int main()
     RUN_TEST(test_gen_pch_list);
     RUN_TEST(test_gen_static_library_install_uses_archive);
     RUN_TEST(test_gen_copy_dlls_guarded_and_source_groups_external);
+    RUN_TEST(test_gen_variables_and_list_concat);
+    RUN_TEST(test_gen_dict_variable_merge);
+    RUN_TEST(test_gen_fstring_variable_and_self_name);
+    RUN_TEST(test_gen_fstring_option_becomes_cmake_reference);
+    RUN_TEST(test_gen_fstring_env_and_cmake_syntax_passthrough);
+    RUN_TEST(test_gen_fstring_list_variable_joins_with_spaces);
+    RUN_TEST(test_gen_boolean_conditions);
+    RUN_TEST(test_gen_raw_cmake_in_target_and_root);
+    RUN_TEST(test_gen_root_raw_cmake_before_subdirectories);
 
     std::cout << std::endl;
     std::cout << "Results: " << s_testsPassed << "/" << s_testsRun << " passed";

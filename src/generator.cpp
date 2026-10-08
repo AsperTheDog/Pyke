@@ -170,6 +170,12 @@ std::string Generator::generateRoot()
         l_out << "\nenable_testing()\n";
     }
 
+    if (!m_program.rawCmake.empty())
+    {
+        l_out << "\n";
+        for (const RawCmake& l_raw : m_program.rawCmake) l_out << rawCmakeBlock(l_raw.text, "");
+    }
+
     if (!m_program.targets.empty())
     {
         l_out << "\n";
@@ -513,6 +519,25 @@ void Generator::emitAssignment(const Expression& p_lhs, const Expression& p_rhs,
         return;
     }
 
+    if (l_attr == "cmake")
+    {
+        // Escape hatch: lines go into the target's CMakeLists.txt exactly as written
+        std::vector<const Expression*> l_lines;
+        if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
+        {
+            for (const ExprPtr& l_elem : l_list->elements) l_lines.push_back(l_elem.get());
+        }
+        else
+        {
+            l_lines.push_back(&p_rhs);
+        }
+        for (const Expression* l_line : l_lines)
+        {
+            if (auto* l_str = std::get_if<StringLiteral>(&l_line->value)) p_out += rawCmakeBlock(l_str->value, l_ind);
+        }
+        return;
+    }
+
     if (l_attr == "sources")
     {
         if (auto* l_list = std::get_if<ListLiteral>(&p_rhs.value))
@@ -719,6 +744,15 @@ void Generator::generateAugAssignment(const AugAssignStatement& p_aug, const Tar
     emitAssignment(*p_aug.target, *p_aug.value, p_target, p_out, p_indentLevel);
 }
 
+std::string Generator::rawCmakeBlock(const std::string& p_text, const std::string& p_indent)
+{
+    std::string l_out;
+    std::istringstream l_in(p_text);
+    std::string l_line;
+    while (std::getline(l_in, l_line)) l_out += (l_line.empty() ? "" : p_indent) + l_line + "\n";
+    return l_out;
+}
+
 // Escapes a literal for use inside a CMake quoted argument. Variable references
 // (${...}, $ENV{...}) are intentionally left intact so env imports keep working.
 static std::string escapeCmake(const std::string& p_value)
@@ -770,12 +804,41 @@ std::string Generator::exprToCmake(const Expression& p_expr)
     return "";
 }
 
+// True when the text has an AND/OR outside any parentheses, i.e. embedding it in a larger condition could regroup it
+static bool needsGrouping(const std::string& p_text)
+{
+    int l_depth = 0;
+    for (size_t l_i = 0; l_i < p_text.size(); l_i++)
+    {
+        if (p_text[l_i] == '(') l_depth++;
+        else if (p_text[l_i] == ')') l_depth--;
+        else if (l_depth == 0 && p_text[l_i] == ' ' && (p_text.compare(l_i, 5, " AND ") == 0 || p_text.compare(l_i, 4, " OR ") == 0)) return true;
+    }
+    return false;
+}
+
 std::string Generator::conditionToCmake(const Expression& p_expr)
 {
     if (auto* l_cmp = std::get_if<Comparison>(&p_expr.value))
     {
         std::string l_positive = comparisonToCmake(*l_cmp);
         return l_cmp->op == "!=" ? "NOT (" + l_positive + ")" : l_positive;
+    }
+
+    if (auto* l_bool = std::get_if<BoolOp>(&p_expr.value))
+    {
+        // Parenthesize anything compound so AND/OR precedence can never regroup the user's intent
+        auto l_operand = [&](const Expression& p_e)
+        {
+            std::string l_text = conditionToCmake(p_e);
+            return needsGrouping(l_text) ? "(" + l_text + ")" : l_text;
+        };
+        return l_operand(*l_bool->left) + (l_bool->op == "and" ? " AND " : " OR ") + l_operand(*l_bool->right);
+    }
+
+    if (auto* l_not = std::get_if<NotExpr>(&p_expr.value))
+    {
+        return "NOT (" + conditionToCmake(*l_not->operand) + ")";
     }
 
     if (auto* l_id = std::get_if<Identifier>(&p_expr.value))

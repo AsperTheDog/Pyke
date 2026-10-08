@@ -384,6 +384,62 @@ void test_cycle_via_configure_link()
 }
 
 
+static std::vector<pyke::Diagnostic> analyzeDiagnostics(const std::string& p_rawSource)
+{
+    std::string l_source = withProject(p_rawSource);
+    pyke::Lexer l_lexer(l_source);
+    std::vector<pyke::Token> l_tokens = l_lexer.tokenize();
+    pyke::Parser l_parser(l_tokens);
+    pyke::Program l_program = l_parser.parse();
+    pyke::Analyzer l_analyzer(l_program);
+    l_analyzer.analyze();
+    return l_analyzer.diagnostics();
+}
+
+void test_suggest_attribute_with_column()
+{
+    // line 1 is the injected project line; the typo is on line 5
+    std::vector<pyke::Diagnostic> l_d = analyzeDiagnostics("@Executable\ntarget A():\n    def configure(self):\n        self.sorces = [\"a.cpp\"]\n");
+    ASSERT_TRUE(!l_d.empty(), "Has a diagnostic");
+    ASSERT_TRUE(l_d[0].message.find("did you mean 'sources'") != std::string::npos, "Suggests sources");
+    ASSERT_EQ(l_d[0].line, 5, "Line");
+    ASSERT_EQ(l_d[0].column, 14, "Column points at the attribute name");
+}
+
+void test_suggest_dependency_and_link()
+{
+    ASSERT_TRUE(anyErrorContains("from packages import fmt\n@Executable\ntarget A(PRIVATE fm):\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n", "did you mean 'fmt'"), "Dependency suggestion");
+    ASSERT_TRUE(anyErrorContains("from packages import Threads\n@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.link += [Thread]\n", "did you mean 'Threads'"), "Link suggestion");
+}
+
+void test_suggest_condition_names_and_values()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        if platfrom == \"linux\":\n            self.flags += [\"-x\"]\n", "did you mean 'platform'"), "Variable typo");
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        if platform == \"linx\":\n            self.flags += [\"-x\"]\n", "did you mean 'linux'"), "Value typo");
+}
+
+void test_boolean_condition_operands_are_validated()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        if platform == \"linux\" and not nope:\n            self.flags += [\"-x\"]\n", "unknown variable 'nope'"), "Operand inside and/not");
+}
+
+void test_cmake_attribute_validation()
+{
+    ASSERT_TRUE(analyzeSource("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.cmake += [\"message(hi)\"]\n"), "cmake lines are accepted");
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.cmake += [1]\n", "'cmake' entries must be strings"), "Non-string rejected");
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n    def install(self):\n        self.cmake = [\"x\"]\n", "only valid inside configure()"), "cmake is configure-only");
+}
+
+void test_bare_name_assignment_hint()
+{
+    ASSERT_TRUE(anyErrorContains("@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        flags = [\"-x\"]\n", "declare constants at the top level"), "Hint for bare assignment");
+}
+
+void test_variables_usable_in_targets_end_to_end()
+{
+    ASSERT_TRUE(analyzeSource("w = [\"-Wall\"]\n@Executable\ntarget A():\n    def configure(self):\n        self.sources = [\"a.cpp\"]\n        self.flags += w + [\"-Werror\"]\n"), "Variables compose and validate");
+}
+
 int main()
 {
     std::cout << "=== Pyke Analyzer Tests ===" << std::endl;
@@ -412,6 +468,13 @@ int main()
     RUN_TEST(test_option_validation);
     RUN_TEST(test_cycle_reported_once_with_chain);
     RUN_TEST(test_cycle_via_configure_link);
+    RUN_TEST(test_suggest_attribute_with_column);
+    RUN_TEST(test_suggest_dependency_and_link);
+    RUN_TEST(test_suggest_condition_names_and_values);
+    RUN_TEST(test_boolean_condition_operands_are_validated);
+    RUN_TEST(test_cmake_attribute_validation);
+    RUN_TEST(test_bare_name_assignment_hint);
+    RUN_TEST(test_variables_usable_in_targets_end_to_end);
 
     std::cout << std::endl;
     std::cout << "Results: " << s_testsPassed << "/" << s_testsRun << " passed";

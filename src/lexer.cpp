@@ -311,6 +311,14 @@ Token Lexer::lexIdentifierOrKeyword()
         l_value += advance();
     }
 
+    // f"..." is a string whose {names} the parser resolves
+    if (l_value == "f" && !atEnd() && peek() == '"')
+    {
+        Token l_str = lexString();
+        if (l_str.type == TokenType::STRING_LITERAL) l_str.type = TokenType::FSTRING_LITERAL;
+        return l_str;
+    }
+
     TokenType l_type = keywordType(l_value);
     return makeToken(l_type, l_value);
 }
@@ -379,6 +387,9 @@ TokenType Lexer::keywordType(const std::string& p_word) const
     if (p_word == "if")             return TokenType::IF;
     if (p_word == "elif")           return TokenType::ELIF;
     if (p_word == "else")           return TokenType::ELSE;
+    if (p_word == "and")            return TokenType::AND;
+    if (p_word == "or")             return TokenType::OR;
+    if (p_word == "not")            return TokenType::NOT;
     if (p_word == "option")         return TokenType::OPTION;
     if (p_word == "True")           return TokenType::TRUE_KW;
     if (p_word == "False")          return TokenType::FALSE_KW;

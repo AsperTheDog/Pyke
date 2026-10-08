@@ -362,6 +362,39 @@ void test_dict_literal()
     ASSERT_EQ(l_tokens[4].type, pyke::TokenType::RIGHT_BRACE, "}");
 }
 
+void test_fstring_token()
+{
+    pyke::Lexer l_lexer("f\"a{b}\"");
+    std::vector<pyke::Token> l_toks = contentTokens(l_lexer.tokenize());
+    ASSERT_EQ(l_toks.size(), size_t(1), "One token");
+    ASSERT_TRUE(l_toks[0].type == pyke::TokenType::FSTRING_LITERAL, "f-string type");
+    ASSERT_EQ(l_toks[0].value, std::string("a{b}"), "f-string raw content");
+}
+
+void test_f_identifier_not_fstring()
+{
+    pyke::Lexer l_lexer("f = 1");
+    std::vector<pyke::Token> l_toks = contentTokens(l_lexer.tokenize());
+    ASSERT_TRUE(l_toks[0].type == pyke::TokenType::IDENTIFIER, "'f' alone stays an identifier");
+}
+
+void test_boolean_keywords()
+{
+    pyke::Lexer l_lexer("and or not android");
+    std::vector<pyke::Token> l_toks = contentTokens(l_lexer.tokenize());
+    ASSERT_TRUE(l_toks[0].type == pyke::TokenType::AND, "and");
+    ASSERT_TRUE(l_toks[1].type == pyke::TokenType::OR, "or");
+    ASSERT_TRUE(l_toks[2].type == pyke::TokenType::NOT, "not");
+    ASSERT_TRUE(l_toks[3].type == pyke::TokenType::IDENTIFIER, "'android' is an identifier");
+}
+
+void test_not_equal_token()
+{
+    pyke::Lexer l_lexer("a != b");
+    std::vector<pyke::Token> l_toks = contentTokens(l_lexer.tokenize());
+    ASSERT_TRUE(l_toks[1].type == pyke::TokenType::COMPARISON && l_toks[1].value == "!=", "!= is a comparison");
+}
+
 int main()
 {
     std::cout << "=== Pyke Lexer Tests ===" << std::endl;
@@ -388,6 +421,10 @@ int main()
     RUN_TEST(test_dot_access);
     RUN_TEST(test_option_declaration);
     RUN_TEST(test_dict_literal);
+    RUN_TEST(test_fstring_token);
+    RUN_TEST(test_f_identifier_not_fstring);
+    RUN_TEST(test_boolean_keywords);
+    RUN_TEST(test_not_equal_token);
 
     std::cout << std::endl;
     std::cout << "Results: " << s_testsPassed << "/" << s_testsRun << " passed";

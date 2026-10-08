@@ -10,6 +10,7 @@ enum class TokenType
 {
     IDENTIFIER,
     STRING_LITERAL,
+    FSTRING_LITERAL,
     INT_LITERAL,
     BOOL_LITERAL,
 
@@ -22,6 +23,9 @@ enum class TokenType
     IF,
     ELIF,
     ELSE,
+    AND,
+    OR,
+    NOT,
     OPTION,
     TRUE_KW,
     FALSE_KW,
@@ -79,6 +83,7 @@ inline std::string_view tokenTypeName(TokenType p_type)
     {
         case TokenType::IDENTIFIER:     return "Identifier";
         case TokenType::STRING_LITERAL:  return "StringLiteral";
+        case TokenType::FSTRING_LITERAL: return "FStringLiteral";
         case TokenType::INT_LITERAL:     return "IntLiteral";
         case TokenType::BOOL_LITERAL:    return "BoolLiteral";
         case TokenType::FROM:           return "From";
@@ -90,6 +95,9 @@ inline std::string_view tokenTypeName(TokenType p_type)
         case TokenType::IF:             return "If";
         case TokenType::ELIF:           return "Elif";
         case TokenType::ELSE:           return "Else";
+        case TokenType::AND:            return "And";
+        case TokenType::OR:             return "Or";
+        case TokenType::NOT:            return "Not";
         case TokenType::OPTION:         return "Option";
         case TokenType::TRUE_KW:        return "True";
         case TokenType::FALSE_KW:       return "False";

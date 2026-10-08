@@ -9,6 +9,14 @@
 namespace pyke
 {
 
+struct Diagnostic
+{
+    int line = 0;
+    int column = 0; // 0 = unknown (the renderer points at the first non-blank character)
+    bool warning = false;
+    std::string message;
+};
+
 class Analyzer
 {
 public:
@@ -19,6 +27,7 @@ public:
     bool hasErrors() const { return !m_errors.empty(); }
     const std::vector<std::string>& errors() const { return m_errors; }
     const std::vector<std::string>& warnings() const { return m_warnings; }
+    const std::vector<Diagnostic>& diagnostics() const { return m_diagnostics; }
 
 private:
     void collectNames();
@@ -40,8 +49,12 @@ private:
     static bool isValidIdentifier(const std::string& p_name);
 
     std::string where(int p_line) const;
+    // Messages may start with "Line N: " (legacy form); it is parsed into the diagnostic's line.
     void error(const std::string& p_message);
     void warning(const std::string& p_message);
+    void errorAt(int p_line, int p_column, const std::string& p_message);
+    void warningAt(int p_line, int p_column, const std::string& p_message);
+    void record(bool p_warning, int p_line, int p_column, const std::string& p_message);
 
     const Program& m_program;
     std::set<std::string> m_targetNames;
@@ -52,6 +65,7 @@ private:
     std::map<std::string, const TargetDecl*> m_targetsByName;
     std::vector<std::string> m_errors;
     std::vector<std::string> m_warnings;
+    std::vector<Diagnostic> m_diagnostics;
 };
 
 } // namespace pyke
